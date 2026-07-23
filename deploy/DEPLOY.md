@@ -5,37 +5,42 @@ connector, using a free VPS. Steps you do yourself are marked **(you)**.
 
 ## 1. Get a free VPS **(you)**
 
-[Oracle Cloud's Always Free tier](https://www.oracle.com/cloud/free/) is the
-most practical genuinely-free-forever option — a real, persistent VM with a
-public IP (unlike AWS/GCP free tiers, which are free only for 12 months or a
-trial credit).
+[Google Cloud's Always Free tier](https://cloud.google.com/free) includes
+one `e2-micro` instance per billing account, permanently free (not a
+time-limited trial), as long as it stays in an eligible US region.
 
-1. Sign up at oracle.com/cloud/free. You'll need an email, phone number, and
-   a card for identity verification — the Always Free resources below don't
-   get charged.
-2. In the console: **Compute → Instances → Create Instance**.
-3. Image: **Ubuntu 24.04** (or latest LTS). Shape: click "Change shape" and
-   pick an **Always Free eligible** shape — the Ampere `VM.Standard.A1.Flex`
-   with 2 OCPUs / 12 GB RAM is comfortable for this server (up to 4
-   OCPU/24 GB total is free). If Ampere capacity is unavailable in your
-   region, `VM.Standard.E2.1.Micro` (x86, 1 GB RAM) also works but is tight.
-4. Under **Add SSH keys**, either paste your own public key
-   (`~/.ssh/id_ed25519.pub` from your own machine) or let Oracle generate a
-   key pair and download the private key — you'll need it to SSH in.
-5. Create the instance and note its **public IP address**.
-6. Under the instance's **Subnet → Security List** (or attach a Network
-   Security Group), add ingress rules allowing TCP **80** and **443** from
-   `0.0.0.0/0`. Port 22 (SSH) is open by default.
+1. Sign up / sign in at [console.cloud.google.com](https://console.cloud.google.com).
+   You'll need a card on file for identity verification — Always Free
+   resources within the limits below don't get charged.
+2. Create (or select) a project.
+3. **Compute Engine → VM instances → Create Instance**.
+4. **Region**: pick one of the free-eligible regions — `us-west1`,
+   `us-central1`, or `us-east1` (any zone within them). Other regions incur
+   charges.
+5. **Machine type**: `e2-micro` (2 vCPU shared-core, **1 GB RAM** — this is
+   the free-tier limit, so the setup script below adds swap to compensate).
+6. **Boot disk**: Ubuntu 24.04 LTS, and make sure the disk type is
+   **Standard persistent disk** (not SSD/balanced) at 30 GB or less — that's
+   what's covered by Always Free.
+7. **Firewall**: tick both **"Allow HTTP traffic"** and **"Allow HTTPS
+   traffic"** checkboxes. This auto-creates the `default-allow-http` /
+   `default-allow-https` VPC firewall rules and tags the instance, so 80/443
+   are reachable without extra console steps.
+8. Create the instance and note its **external (public) IP address**.
 
-> Oracle's Ubuntu images *also* filter inbound traffic with `iptables` on
-> the host itself, independent of the console security list. The setup
-> script in step 3 opens 80/443 there too, but if requests still time out,
-> re-check both layers.
+> If you instead create the instance via `gcloud` CLI or Terraform rather
+> than the checkboxes above, you'll need to create the equivalent firewall
+> rules yourself (`gcloud compute firewall-rules create --allow=tcp:80,tcp:443 ...`).
 
 ## 2. SSH in **(you)**
 
+Easiest: in the console, click the **SSH** button next to your instance —
+it opens a browser-based terminal, no key management needed.
+
+Alternatively, from your own machine with the [gcloud CLI](https://cloud.google.com/sdk/docs/install):
+
 ```bash
-ssh ubuntu@<your-server-public-ip>
+gcloud compute ssh <instance-name> --zone=<zone>
 ```
 
 ## 3. Run the setup script **(you, on the server)**
@@ -59,7 +64,7 @@ Let's Encrypt certificate. If you don't want to buy a domain, use
 [sslip.io](https://sslip.io) — it resolves `<ip-with-dashes>.sslip.io` to
 that IP automatically, no DNS setup needed:
 
-- Server IP `141.147.1.2` → hostname `141-147-1-2.sslip.io`
+- Server IP `34.123.45.67` → hostname `34-123-45-67.sslip.io`
 
 If you already own a domain, point an A record at the server's IP instead
 and use that hostname.
@@ -74,7 +79,7 @@ nano .env   # or vim/your editor of choice
 Set these regardless of auth method:
 
 ```bash
-PUBLIC_HOSTNAME=141-147-1-2.sslip.io     # your hostname from step 4
+PUBLIC_HOSTNAME=34-123-45-67.sslip.io     # your hostname from step 4
 PORT=9080
 ```
 
@@ -109,7 +114,7 @@ In the [Amazon Developer Console](https://developer.amazon.com/), set your
 app's "Allowed Return URLs" to:
 
 ```
-https://141-147-1-2.sslip.io/auth/callback
+https://34-123-45-67.sslip.io/auth/callback
 ```
 
 (swap in your real hostname from step 4).
@@ -149,7 +154,7 @@ Caddy is the sole public entrypoint.
 ## 7. Verify **(you)**
 
 ```bash
-curl -i https://141-147-1-2.sslip.io/mcp \
+curl -i https://34-123-45-67.sslip.io/mcp \
   -H "Authorization: Bearer <your MCP_INBOUND_TOKEN>" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
@@ -163,7 +168,7 @@ and certificate are working.
 
 1. [claude.ai](https://claude.ai) → profile icon → **Settings** → **Connectors**.
 2. **Add custom connector**.
-3. Name: "Amazon Ads". URL: `https://141-147-1-2.sslip.io/mcp`.
+3. Name: "Amazon Ads". URL: `https://34-123-45-67.sslip.io/mcp`.
 4. Authentication: **Bearer token**, value = your `MCP_INBOUND_TOKEN`.
 5. Save. claude.ai validates the connection; the Amazon Ads tools become
    available in chats where you enable this connector.

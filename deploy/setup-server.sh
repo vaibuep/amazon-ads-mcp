@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# One-time OS-level setup for a fresh Ubuntu VPS (e.g. Oracle Cloud Always
-# Free). Installs Docker, opens ports 80/443, and clones this repo.
+# One-time OS-level setup for a fresh Ubuntu VPS (e.g. Google Cloud's
+# Always Free e2-micro). Adds swap, installs Docker, opens ports 80/443,
+# and clones this repo.
 #
 # Usage (on the server, as a user with sudo):
 #   curl -fsSL https://raw.githubusercontent.com/vaibuep/amazon-ads-mcp/claude/amazon-ads-mcp-connector-bnxcy2/deploy/setup-server.sh | bash
@@ -10,6 +11,21 @@ set -euo pipefail
 REPO_URL="https://github.com/vaibuep/amazon-ads-mcp.git"
 REPO_BRANCH="claude/amazon-ads-mcp-connector-bnxcy2"
 REPO_DIR="$HOME/amazon-ads-mcp"
+
+echo "==> Checking memory / swap"
+if [ "$(swapon --show=NAME --noheadings | wc -l)" -eq 0 ] && [ ! -f /swapfile ]; then
+  total_mem_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
+  if [ "$total_mem_kb" -lt 2097152 ]; then
+    echo "Low-memory instance detected (< 2 GB RAM, e.g. e2-micro's 1 GB) — adding 2 GB swap"
+    sudo fallocate -l 2G /swapfile
+    sudo chmod 600 /swapfile
+    sudo mkswap /swapfile
+    sudo swapon /swapfile
+    echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab > /dev/null
+  fi
+else
+  echo "Swap already configured, skipping."
+fi
 
 echo "==> Installing Docker Engine + Compose plugin"
 if ! command -v docker >/dev/null 2>&1; then
@@ -35,10 +51,10 @@ if command -v ufw >/dev/null 2>&1 && sudo ufw status | grep -q "Status: active";
   sudo ufw allow 80/tcp
   sudo ufw allow 443/tcp
 fi
-# Oracle Cloud Ubuntu images filter inbound traffic with iptables directly
-# (in addition to the VCN security list/NSG configured in the console), and
-# ufw is often inactive there. Insert ACCEPT rules ahead of the default
-# REJECT so 80/443 pass through the host firewall too.
+# Some providers' Ubuntu images filter inbound traffic with iptables
+# directly, independent of the console-level firewall (VPC firewall rules,
+# security groups, etc). Insert ACCEPT rules ahead of any default REJECT so
+# 80/443 pass through the host firewall too, in case that's the case here.
 if command -v iptables >/dev/null 2>&1; then
   for port in 80 443; do
     sudo iptables -C INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null || \
@@ -50,8 +66,9 @@ if command -v iptables >/dev/null 2>&1; then
     sudo sh -c 'iptables-save > /etc/iptables/rules.v4'
   fi
 fi
-echo "NOTE: If this server is on a cloud provider, also open inbound TCP 80 and 443"
-echo "      in its console-level firewall (Oracle: VCN Security List / NSG; AWS: Security Group; etc)."
+echo "NOTE: Also make sure inbound TCP 80 and 443 are open in your cloud"
+echo "      provider's console-level firewall (GCP: VPC firewall rules /"
+echo "      the 'Allow HTTP/HTTPS traffic' instance checkboxes; AWS: Security Group; etc)."
 
 echo "==> Cloning $REPO_URL ($REPO_BRANCH) into $REPO_DIR"
 if [ -d "$REPO_DIR/.git" ]; then
