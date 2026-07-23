@@ -1,0 +1,200 @@
+import sys
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+# Add src to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
+
+# Markers are registered centrally in pyproject.toml [tool.pytest.ini_options]
+# with --strict-markers to catch typos. Don't duplicate here.
+
+
+def pytest_collection_modifyitems(config, items):
+    """Skip ``@pytest.mark.live`` tests unless ``RUN_LIVE_TESTS=1``.
+
+    Live tests hit a real Amazon Ads sandbox account and require
+    credentials in the environment. Default-skip protects:
+
+    - Local dev: contributors shouldn't need sandbox credentials to run
+      ``pytest`` and have it pass.
+    - Standard CI: the regular test job must not call out to Amazon
+      (network failures, rate limits, credential rotation would all
+      manifest as flakes).
+
+    The dedicated ``live-integration.yml`` workflow runs weekly and sets
+    ``RUN_LIVE_TESTS=1`` to opt in. Live failures are triaged separately
+    from unit/integration regressions because they often indicate
+    upstream changes (schema drift, auth quirks) rather than our own
+    regressions.
+    """
+    import os
+
+    if os.environ.get("RUN_LIVE_TESTS") == "1":
+        return  # opted in — let live tests run
+    skip_live = pytest.mark.skip(
+        reason="live tests require RUN_LIVE_TESTS=1 + sandbox credentials"
+    )
+    for item in items:
+        if "live" in item.keywords:
+            item.add_marker(skip_live)
+
+
+@pytest.fixture(autouse=True)
+def _reset_session_state(request):
+    """Reset per-request ContextVars between tests.
+
+    Prevents auth state from leaking between tests when using
+    ContextVar-backed session isolation.
+
+    Live tests (``@pytest.mark.live``) opt out — they hit a real sandbox
+    account and need real per-test session state, not mocked-and-reset.
+    """
+    if request.node.get_closest_marker("live"):
+        yield
+        return
+
+    from amazon_ads_mcp.auth.session_state import reset_session_state
+
+    reset_session_state()
+    yield
+    reset_session_state()
+
+
+def _rebind_imported_settings(monkeypatch) -> None:
+    """Replace cached ``settings`` on modules that use ``from ... import settings``.
+
+    The global ``amazon_ads_mcp.config.settings.settings`` instance is created at
+    import time; ``monkeypatch.setenv`` alone does not update other modules that
+    bound the old object. Rebuild :class:`~amazon_ads_mcp.config.settings.Settings`
+    from the current environment and assign it everywhere the server reads config.
+    """
+    from amazon_ads_mcp.auth.manager import AuthManager
+    from amazon_ads_mcp.config.settings import Settings
+
+    fresh = Settings()
+    monkeypatch.setattr("amazon_ads_mcp.auth.manager.settings", fresh)
+    monkeypatch.setattr("amazon_ads_mcp.server.server_builder.settings", fresh)
+    monkeypatch.setattr("amazon_ads_mcp.server.builtin_tools.settings", fresh)
+    monkeypatch.setattr("amazon_ads_mcp.server.code_mode.settings", fresh)
+    AuthManager.reset()
+
+
+@pytest.fixture(autouse=True)
+def mock_env_vars(monkeypatch, request):
+    """Set required environment variables for tests.
+
+    This fixture automatically sets up the minimum required environment
+    variables needed for the Settings class to initialize properly during tests.
+
+    Live tests (``@pytest.mark.live``) opt out — they need the real sandbox
+    credentials from the environment, not the ``"test-*"`` placeholders. The
+    live lane's per-test ``_require_direct_credentials()`` check verifies
+    that real values are present.
+    """
+    if request.node.get_closest_marker("live"):
+        yield
+        return
+
+    # Authentication configuration
+    monkeypatch.setenv("AUTH_METHOD", "direct")
+    monkeypatch.setenv("AMAZON_AD_API_CLIENT_ID", "test-client-id")
+    monkeypatch.setenv("AMAZON_AD_API_CLIENT_SECRET", "test-client-secret")
+    monkeypatch.setenv("AMAZON_AD_API_REFRESH_TOKEN", "test-refresh-token")
+
+    # Optional but commonly needed
+    monkeypatch.setenv("AMAZON_ADS_REGION", "na")
+    monkeypatch.setenv("AMAZON_ADS_SANDBOX_MODE", "false")
+    # Full tool catalog for integration tests; avoids requiring pydantic_monty.
+    monkeypatch.setenv("CODE_MODE", "false")
+    
+    # OAuth configuration (for OAuth tests)
+    monkeypatch.setenv("OAUTH_REDIRECT_URI", "http://localhost:5173/auth/callback")
+    
+    # Server configuration
+    monkeypatch.setenv("MCP_SERVER_NAME", "amazon-ads-test")
+    monkeypatch.setenv("MCP_SERVER_VERSION", "0.1.0-test")
+    
+    # Logging
+    monkeypatch.setenv("LOG_LEVEL", "INFO")
+
+    _rebind_imported_settings(monkeypatch)
+
+    yield
+
+
+@pytest.fixture
+def mock_auth_manager():
+    """Mock authentication manager.
+
+    Uses ``spec=AuthManager`` so unknown attribute access fails at test time
+    instead of silently returning a child Mock — this catches drift when
+    AuthManager renames or removes methods.
+    """
+    from amazon_ads_mcp.auth.manager import AuthManager
+
+    manager = MagicMock(spec=AuthManager)
+    manager.get_headers = AsyncMock(return_value={
+        "Authorization": "Bearer test-token",
+        "Amazon-Advertising-API-ClientId": "test-client-id",
+        "Amazon-Advertising-API-Scope": "test-profile-123"
+    })
+    manager.get_active_identity = MagicMock(return_value=None)
+    manager.get_active_profile_id = MagicMock(return_value="test-profile-123")
+    manager.get_active_region = MagicMock(return_value="na")
+    return manager
+
+
+def make_direct_auth_manager(headers=None):
+    """Build a fully-spec'd AuthManager mock for the direct (non-OpenBridge)
+    provider. Centralizes the pattern that previously duplicated across
+    ``test_authenticated_client.py``, ``test_client_accept_resolver.py``,
+    ``test_authenticated_client_dsp_wire.py``, and
+    ``test_auth_header_propagation.py``.
+
+    Both manager and provider are spec'd:
+    - ``manager`` uses ``spec=AuthManager`` so attribute drift on the real
+      class fails at test time.
+    - ``provider`` uses ``spec=BaseAmazonAdsProvider`` for the same reason.
+
+    The default ``headers`` mimic a typical successful auth response.
+    Callers can pass a custom dict to override.
+
+    This is a *factory function*, not a fixture: callers can build N
+    independent managers in a single test (e.g., to simulate concurrent
+    clients) without fixture-scope shenanigans.
+    """
+    from amazon_ads_mcp.auth.base import BaseAmazonAdsProvider
+    from amazon_ads_mcp.auth.manager import AuthManager
+
+    manager = MagicMock(spec=AuthManager)
+    manager.get_headers = AsyncMock(
+        return_value=headers or {
+            "Authorization": "Bearer test",
+            "Amazon-Advertising-API-ClientId": "test-client-id",
+        }
+    )
+    manager.provider = MagicMock(spec=BaseAmazonAdsProvider)
+    manager.provider.requires_identity_region_routing = MagicMock(return_value=False)
+    manager.provider.headers_are_identity_specific = MagicMock(return_value=False)
+    manager.provider.region_controlled_by_identity = MagicMock(return_value=False)
+    manager.provider.provider_type = "direct"
+    manager.get_active_identity = MagicMock(return_value=None)
+    return manager
+
+
+@pytest.fixture
+def sample_oauth_token():
+    """Sample OAuth token response."""
+    return {
+        "access_token": "test-access-token",
+        "refresh_token": "test-refresh-token",
+        "token_type": "bearer",
+        "expires_in": 3600,
+        "scope": "advertising::campaign_management"
+    }
+
+
+# Rely on pytest-asyncio for async test handling; no custom hook needed.

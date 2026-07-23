@@ -1,0 +1,150 @@
+[project]
+name = "amazon-ads-mcp"
+version = "0.3.29"
+description = "Amazon Ads API MCP Server - Implementation for Amazon Advertising API"
+readme = "README.md"
+requires-python = ">=3.10,<4.0"
+dependencies = [ "fastmcp[tasks]>=3.4.2,<4", "python-dotenv>=1.2.1", "pydantic>=2.12.5", "pydantic-settings>=2.12.0", "httpx[http2]>=0.28.1", "pyjwt>=2.10.1", "cryptography>=41.0.0", "openai>=1.109.1", "PyYAML>=6.0.2", "tiktoken>=0.12.0", "jsonschema>=4.25.1",]
+[[project.authors]]
+name = "Amazon Ads API MCP SDK"
+
+[build-system]
+requires = [ "poetry-core",]
+build-backend = "build_package"
+backend-path = [ ".",]
+
+[dependency-groups]
+dev = [ "black>=25.12,<27.0", "isort>=7,<9", "mypy>=1.19.1", "pytest>=9.0.2", "pytest-asyncio>=1.3.0", "pytest-cov>=7.0.0", "ruff>=0.14.10", "fastmcp[code-mode]>=3.4.2,<4", "hypothesis>=6.152.3", "respx>=0.23.1",]
+
+[project.optional-dependencies]
+audit = [ "tiktoken>=0.7.0", "rich>=13.0",]
+code-mode = [ "fastmcp[code-mode]>=3.4.2,<4",]
+
+[project.license]
+text = "MIT"
+
+[project.scripts]
+amazon-ads-mcp = "amazon_ads_mcp.server.mcp_server:main"
+
+[tool.poetry]
+name = "amazon-ads-mcp"
+description = "Amazon Ads API MCP Server - Implementation for Amazon Advertising API"
+authors = [ "Amazon Ads API MCP SDK",]
+readme = "README.md"
+license = "MIT"
+exclude = [ "src/amazon_ads_mcp/build/**/*", "src/amazon_ads_mcp/tool_audit/**/*",]
+[[tool.poetry.packages]]
+include = "amazon_ads_mcp"
+from = "src"
+
+[[tool.poetry.include]]
+path = "src/amazon_ads_mcp/resources/*.json"
+format = "wheel"
+
+[[tool.poetry.include]]
+path = "src/amazon_ads_mcp/resources/overlays/*.json"
+format = "wheel"
+
+[[tool.poetry.include]]
+path = "dist/openapi/resources/*.json"
+format = "sdist"
+
+[[tool.poetry.include]]
+path = "dist/openapi/overlays/*.json"
+format = "sdist"
+
+[[tool.poetry.include]]
+path = "src/amazon_ads_mcp/build/stage_wheel_resources.py"
+format = "sdist"
+
+[[tool.poetry.include]]
+path = "build_package.py"
+format = "sdist"
+
+[[tool.poetry.include]]
+path = "src/amazon_ads_mcp/resources/adsv1/dimensions.json"
+format = "wheel"
+
+[[tool.poetry.include]]
+path = "src/amazon_ads_mcp/resources/adsv1/metrics.json"
+format = "wheel"
+
+[[tool.poetry.include]]
+path = "src/amazon_ads_mcp/resources/adsv1/index.json"
+format = "wheel"
+
+[[tool.poetry.include]]
+path = "src/amazon_ads_mcp/resources/adsv1/catalog_meta.json"
+format = "wheel"
+
+[[tool.poetry.include]]
+path = "src/amazon_ads_mcp/resources/adsv1/dimension_label_index.json"
+format = "wheel"
+
+[[tool.poetry.include]]
+path = "src/amazon_ads_mcp/resources/contract/jsonschema_error_codes.json"
+format = "wheel"
+
+[tool.black]
+line-length = 79
+target-version = [ "py310",]
+include = "\\.pyi?$"
+extend-exclude = "/(\n  # directories\n  \\.eggs\n  | \\.git\n  | \\.hg\n  | \\.mypy_cache\n  | \\.tox\n  | \\.venv\n  | build\n  | dist\n)/\n"
+
+[tool.isort]
+profile = "black"
+multi_line_output = 3
+include_trailing_comma = true
+force_grid_wrap = 0
+use_parentheses = true
+ensure_newline_before_comments = true
+line_length = 79
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+strict_equality = true
+[[tool.mypy.overrides]]
+module = "fastmcp.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+ignore_errors = true
+
+[tool.pytest.ini_options]
+testpaths = [ "tests",]
+addopts = "-v --strict-markers --strict-config --import-mode=importlib"
+asyncio_mode = "strict"
+markers = [ "slow: long-running tests (wheel builds, subprocess installs) — filtered out of local dev via '-m \"not slow\"' and run only in CI.", "smoke: fast critical-path tests run as a CI gate before the full suite.", "unit: fast isolated unit tests.", "integration: tests exercising the in-memory MCP client or real services.", "auth: authentication and identity flows.", "asyncio: pytest-asyncio marker — required on every async test under asyncio_mode=strict.", "live: tests that hit a real Amazon Ads sandbox account. Default-skipped; require RUN_LIVE_TESTS=1 to opt in. Run weekly in CI to surface schema drift and auth quirks that unit tests cannot catch.",]
+
+[tool.coverage.run]
+source = [ "src/amazon_ads_mcp",]
+omit = [ "*/tests/*", "*/debug/*", "*/tool_audit/*", "*/__main__.py", "*/html_templates.py",]
+
+[tool.coverage.report]
+exclude_lines = [ "pragma: no cover", "def __repr__", "if self.debug:", "if settings.DEBUG", "raise AssertionError", "raise NotImplementedError", "if 0:", "if __name__ == .__main__.:", "class .*\\bProtocol\\):", "@(abc\\.)?abstractmethod",]
+
+[tool.poetry.dependencies.fastmcp]
+version = ">=3.4.2,<4"
+extras = [ "tasks",]
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^9.0.2"
+pytest-asyncio = "^1.3.0"
+black = ">=25.12,<27.0"
+isort = ">=7,<9"
+ruff = ">=0.14.10,<0.16.0"
+mypy = ">=1.19.1,<3.0.0"
+types-pyjwt = "^1.7.1"
+types-python-dotenv = "^1.0.0"

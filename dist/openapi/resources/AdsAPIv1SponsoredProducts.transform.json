@@ -1,0 +1,461 @@
+{
+  "version": "1.0",
+  "generated": "auto",
+  "namespace": "AdsAPIv1SponsoredProducts",
+  "tools": [
+    {
+      "match": {
+        "operationId": "SPCreateAdGroup"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "AdGroups",
+            "to": "adGroups"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "SPCreateAd"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "Ads",
+            "to": "ads"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "SPCreateCampaign"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "Campaigns",
+            "to": "campaigns"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "SPCreateTarget"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "Targets",
+            "to": "targets"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "SPDeleteAdGroup"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "AdGroupIds",
+            "to": "adGroupIds"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "SPDeleteAd"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "AdIds",
+            "to": "adIds"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "SPDeleteCampaign"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "CampaignIds",
+            "to": "campaignIds"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "SPDeleteTarget"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "TargetIds",
+            "to": "targetIds"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "SPQueryAdExtension"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "AdExtensionIdFilter",
+            "to": "adExtensionIdFilter"
+          },
+          {
+            "from": "AdExtensionStatusFilter",
+            "to": "adExtensionStatusFilter"
+          },
+          {
+            "from": "AdExtensionTypeFilter",
+            "to": "adExtensionTypeFilter"
+          },
+          {
+            "from": "AdGroupIdFilter",
+            "to": "adGroupIdFilter"
+          },
+          {
+            "from": "AdIdFilter",
+            "to": "adIdFilter"
+          },
+          {
+            "from": "AdProductFilter",
+            "to": "adProductFilter"
+          },
+          {
+            "from": "MaxResults",
+            "to": "maxResults"
+          },
+          {
+            "from": "NextToken",
+            "to": "nextToken"
+          },
+          {
+            "from": "StateFilter",
+            "to": "stateFilter"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "SPQueryAdGroup"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "AdGroupIdFilter",
+            "to": "adGroupIdFilter"
+          },
+          {
+            "from": "AdProductFilter",
+            "to": "adProductFilter"
+          },
+          {
+            "from": "CampaignIdFilter",
+            "to": "campaignIdFilter"
+          },
+          {
+            "from": "MaxResults",
+            "to": "maxResults"
+          },
+          {
+            "from": "NameFilter",
+            "to": "nameFilter"
+          },
+          {
+            "from": "NextToken",
+            "to": "nextToken"
+          },
+          {
+            "from": "StateFilter",
+            "to": "stateFilter"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "SPQueryAd"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "AdGroupIdFilter",
+            "to": "adGroupIdFilter"
+          },
+          {
+            "from": "AdIdFilter",
+            "to": "adIdFilter"
+          },
+          {
+            "from": "AdProductFilter",
+            "to": "adProductFilter"
+          },
+          {
+            "from": "CampaignIdFilter",
+            "to": "campaignIdFilter"
+          },
+          {
+            "from": "MaxResults",
+            "to": "maxResults"
+          },
+          {
+            "from": "NextToken",
+            "to": "nextToken"
+          },
+          {
+            "from": "StateFilter",
+            "to": "stateFilter"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "SPQueryCampaign"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "AdProductFilter",
+            "to": "adProductFilter"
+          },
+          {
+            "from": "CampaignIdFilter",
+            "to": "campaignIdFilter"
+          },
+          {
+            "from": "MaxResults",
+            "to": "maxResults"
+          },
+          {
+            "from": "NameFilter",
+            "to": "nameFilter"
+          },
+          {
+            "from": "NextToken",
+            "to": "nextToken"
+          },
+          {
+            "from": "PortfolioIdFilter",
+            "to": "portfolioIdFilter"
+          },
+          {
+            "from": "StateFilter",
+            "to": "stateFilter"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "SPQueryTarget"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "AdGroupIdFilter",
+            "to": "adGroupIdFilter"
+          },
+          {
+            "from": "AdProductFilter",
+            "to": "adProductFilter"
+          },
+          {
+            "from": "CampaignIdFilter",
+            "to": "campaignIdFilter"
+          },
+          {
+            "from": "KeywordFilter",
+            "to": "keywordFilter"
+          },
+          {
+            "from": "MatchTypeFilter",
+            "to": "matchTypeFilter"
+          },
+          {
+            "from": "MaxResults",
+            "to": "maxResults"
+          },
+          {
+            "from": "NegativeFilter",
+            "to": "negativeFilter"
+          },
+          {
+            "from": "NextToken",
+            "to": "nextToken"
+          },
+          {
+            "from": "ProductIdFilter",
+            "to": "productIdFilter"
+          },
+          {
+            "from": "StateFilter",
+            "to": "stateFilter"
+          },
+          {
+            "from": "TargetIdFilter",
+            "to": "targetIdFilter"
+          },
+          {
+            "from": "TargetTypeFilter",
+            "to": "targetTypeFilter"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "SPUpdateAdExtension"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "AdExtensions",
+            "to": "adExtensions"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "SPUpdateAdGroup"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "AdGroups",
+            "to": "adGroups"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "SPUpdateAd"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "Ads",
+            "to": "ads"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "SPUpdateCampaign"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "Campaigns",
+            "to": "campaigns"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "SPUpdateTarget"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "Targets",
+            "to": "targets"
+          }
+        ]
+      }
+    }
+  ]
+}

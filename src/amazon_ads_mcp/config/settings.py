@@ -1,0 +1,586 @@
+"""Configuration settings for Amazon Ads API MCP server.
+
+This module defines the configuration settings for the Amazon Ads MCP server,
+including authentication methods, API endpoints, and server configuration.
+Settings are loaded from environment variables and .env files.
+"""
+
+from typing import Literal, Optional
+
+from pydantic import AliasChoices, Field, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from ..utils.region_config import RegionConfig
+
+
+class Settings(BaseSettings):
+    """Application settings loaded from environment variables.
+
+    Manages all configuration settings for the Amazon Ads MCP server.
+    Supports both direct Amazon Ads API authentication and OpenBridge
+    integration. Settings can be configured via environment variables
+    or .env files.
+
+    :param auth_method: Authentication method to use (direct/openbridge/kuudo)
+    :type auth_method: Literal["direct", "openbridge", "kuudo"]
+    :param amazon_ads_client_id: Amazon Ads API Client ID for direct auth
+    :type amazon_ads_client_id: Optional[str]
+    :param amazon_ads_client_secret: Amazon Ads API Client Secret for direct auth
+    :type amazon_ads_client_secret: Optional[str]
+    :param amazon_ads_refresh_token: Amazon Ads API Refresh Token for direct auth
+    :type amazon_ads_refresh_token: Optional[str]
+    :param openbridge_refresh_token: OpenBridge API key (aka refresh token)
+    :type openbridge_refresh_token: Optional[str]
+    :param openbridge_remote_identity_id: OpenBridge remote identity ID
+    :type openbridge_remote_identity_id: Optional[str]
+    :param amazon_ads_region: Amazon Ads API region (na/eu/fe)
+    :type amazon_ads_region: Literal["na", "eu", "fe"]
+    :param amazon_ads_api_base_url: Base URL for Amazon Ads API
+    :type amazon_ads_api_base_url: str
+    :param amazon_ads_sandbox_mode: Enable sandbox mode for testing
+    :type amazon_ads_sandbox_mode: bool
+    :param mcp_server_name: Name of the MCP server
+    :type mcp_server_name: str
+    :param mcp_server_host: Host for the MCP server
+    :type mcp_server_host: str
+    :param mcp_server_port: Port for the MCP server
+    :type mcp_server_port: int
+    :param log_level: Logging level for the application
+    :type log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+    """
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",  # Ignore extra fields in .env file
+    )
+
+    # Authentication method
+    auth_method: Literal["direct", "openbridge", "kuudo"] = Field(
+        "openbridge", description="Authentication method to use"
+    )
+
+    # Direct Amazon Ads API Configuration (BYOA - Bring Your Own API)
+    # These match the standard Amazon Ads API environment variables
+    ad_api_client_id: Optional[str] = Field(
+        None,
+        alias="AMAZON_AD_API_CLIENT_ID",
+        description="Amazon Ads API Client ID (for direct auth)",
+    )
+    ad_api_client_secret: Optional[str] = Field(
+        None,
+        alias="AMAZON_AD_API_CLIENT_SECRET",
+        description="Amazon Ads API Client Secret (for direct auth)",
+    )
+    ad_api_refresh_token: Optional[str] = Field(
+        None,
+        alias="AMAZON_AD_API_REFRESH_TOKEN",
+        description="Amazon Ads API Refresh Token (for direct auth)",
+    )
+    ad_api_profile_id: Optional[str] = Field(
+        None,
+        validation_alias=AliasChoices(
+            "AMAZON_AD_API_PROFILE_ID",
+            "AD_API_PROFILE_ID",
+            "AMAZON_ADS_PROFILE_ID",
+        ),
+        description="Amazon Ads Profile ID (for direct auth)",
+    )
+
+    # Token persistence (disabled by default for security)
+    token_persist: bool = Field(
+        False,
+        validation_alias=AliasChoices(
+            "AMAZON_ADS_TOKEN_PERSIST",
+            "AMAZON_AD_API_TOKEN_PERSIST",
+        ),
+        description="Enable refresh token persistence to disk (insecure, see docs)",
+    )
+
+    # Legacy field names for backward compatibility
+    amazon_ads_client_id: Optional[str] = Field(
+        None,
+        description="Amazon Ads API Client ID (deprecated, use AMAZON_AD_API_CLIENT_ID)",
+    )
+    amazon_ads_client_secret: Optional[str] = Field(
+        None,
+        description="Amazon Ads API Client Secret (deprecated, use AMAZON_AD_API_CLIENT_SECRET)",
+    )
+    amazon_ads_refresh_token: Optional[str] = Field(
+        None,
+        description="Amazon Ads API Refresh Token (deprecated, use AMAZON_AD_API_REFRESH_TOKEN)",
+    )
+
+    # Openbridge Configuration
+    openbridge_refresh_token: Optional[str] = Field(
+        None,
+        validation_alias=AliasChoices("OPENBRIDGE_REFRESH_TOKEN", "OPENBRIDGE_API_KEY"),
+        description="OpenBridge API key (aka refresh token)",
+    )
+    openbridge_remote_identity_id: Optional[str] = Field(
+        None, description="Openbridge Remote Identity ID for Amazon Ads"
+    )
+    openbridge_auth_base_url: Optional[str] = Field(
+        None, description="Openbridge authentication base URL override"
+    )
+    openbridge_identity_base_url: Optional[str] = Field(
+        None, description="Openbridge identity service base URL override"
+    )
+    openbridge_service_base_url: Optional[str] = Field(
+        None, description="Openbridge service base URL override"
+    )
+
+    # Kuudo Configuration
+    kuudo_api_base_url: Optional[str] = Field(
+        None,
+        validation_alias=AliasChoices("KUUDO_API_BASE_URL", "KUUDO_BASE_URL"),
+        description="Kuudo application origin",
+    )
+    kuudo_api_key: Optional[str] = Field(
+        None,
+        alias="KUUDO_API_KEY",
+        description="Kuudo M2M API key",
+    )
+    kuudo_provider: str = Field(
+        "amazon_ads",
+        alias="KUUDO_PROVIDER",
+        description="Kuudo Amazon connection provider",
+    )
+    kuudo_remote_identity_id: Optional[str] = Field(
+        None,
+        alias="KUUDO_REMOTE_IDENTITY_ID",
+        description="Default Kuudo Amazon connection identity",
+    )
+    amazon_ads_region: Literal["na", "eu", "fe"] = Field(
+        "na", description="Amazon Ads API Region"
+    )
+
+    # API Configuration
+    amazon_ads_api_base_url: str = Field(
+        "https://advertising-api.amazon.com",
+        description="Amazon Ads API Base URL",
+    )
+    amazon_ads_sandbox_mode: bool = Field(
+        False, description="Enable sandbox mode for testing"
+    )
+
+    # MCP Server Configuration
+    mcp_server_name: str = Field("amazon-ads-api", description="MCP Server Name")
+    mcp_server_host: str = Field("localhost", description="MCP Server Host")
+    mcp_server_port: int = Field(8000, description="MCP Server Port")
+
+    # Runtime configuration (set by CLI or Docker)
+    port: Optional[int] = Field(
+        None, description="HTTP server port (from PORT env var or CLI)"
+    )
+
+    # Logging
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = Field(
+        "INFO", description="Logging level"
+    )
+
+    # FastMCP Configuration
+    fastmcp_use_experimental_parser: bool = Field(
+        True,
+        description="Enable FastMCP experimental OpenAPI parser for better performance",
+    )
+
+    # Cross-server envelope contract — pre-flight schema-driven key normalization.
+    # See openbridge-mcp/CONTRACT.md for the canonical specification.
+    mcp_schema_key_normalization_enabled: bool = Field(
+        True,
+        alias="MCP_SCHEMA_KEY_NORMALIZATION_ENABLED",
+        description=(
+            "Master switch for schema-driven canonical-key normalization. "
+            "Set false as an escape hatch when Amazon ships fields ahead of the "
+            "OpenAPI spec and strict normalization would block valid calls."
+        ),
+    )
+    mcp_schema_key_normalization_meta: bool = Field(
+        True,
+        alias="MCP_SCHEMA_KEY_NORMALIZATION_META",
+        description=(
+            "Emit `_meta.normalized` events on responses when the middleware "
+            "attempted normalization. Default ON so agents always learn when "
+            "their input was rewritten (Phase 5 early flip per tester "
+            "feedback). Set to false to suppress the telemetry for "
+            "noise-sensitive deployments."
+        ),
+    )
+
+    mcp_schema_constraint_validation_enabled: bool = Field(
+        True,
+        alias="MCP_SCHEMA_CONSTRAINT_VALIDATION_ENABLED",
+        description=(
+            "Run jsonschema constraint validation against the tool's input "
+            "schema before dispatch (types, enums, required, numeric/array "
+            "bounds). Default ON: invalid args surface as "
+            "`mcp_input_validation` errors with `INPUT_VALIDATION_FAILED` "
+            "and the full error path/message preserved (no Amazon "
+            "round-trip, no truncation of helpful enum lists). Set false "
+            "to skip the check — useful when Amazon ships fields ahead of "
+            "the spec or when the spec is malformed. The validator fails "
+            "OPEN on schema-lookup errors (logs telemetry, doesn't break "
+            "tool execution); see feedback_fail_open_telemetry.md."
+        ),
+    )
+
+    mcp_ad_product_cap_validation_enabled: bool = Field(
+        True,
+        alias="MCP_AD_PRODUCT_CAP_VALIDATION_ENABLED",
+        description=(
+            "Enforce per-ad-product `maxResults` caps that Amazon imposes "
+            "below the schema's declared maximum. Default ON: e.g. "
+            "QueryCampaign with `adProductFilter: SPONSORED_PRODUCTS` is "
+            "capped at 1000 even though the schema says 5000 — Amazon "
+            "would 400 with a per-ad-product cap message; we surface it "
+            "locally as `mcp_input_validation` / `INPUT_VALIDATION_FAILED` "
+            "with the offending ad product, the cap, and the requested "
+            "value. Conservative table: only confirmed caps are enforced "
+            "(SPONSORED_PRODUCTS=1000); other ad products fail open until "
+            "their caps are confirmed via wire trace or Amazon docs. Set "
+            "false to skip the check (e.g. when testing new ad-product "
+            "behavior or if Amazon raises a cap)."
+        ),
+    )
+
+    mcp_strict_unknown_fields: bool = Field(
+        True,
+        alias="MCP_STRICT_UNKNOWN_FIELDS",
+        description=(
+            "Reject tool calls that include fields not declared in the tool's "
+            "input schema (after canonical-key normalization AND sidecar "
+            "alias rewrites). Default ON: typo'd or unknown top-level fields "
+            "surface as `mcp_input_validation` errors with `did_you_mean` "
+            "hints instead of being silently dropped (which previously caused "
+            "Amazon defaults to apply — e.g. `stateFilte` typo silently "
+            "ignored, returning all states instead of filtering to ENABLED; "
+            "`maxResult` typo returns 1000 results instead of the intended "
+            "page size). Set false as an escape hatch when Amazon ships "
+            "fields ahead of our OpenAPI spec and strict rejection would "
+            "block valid calls."
+        ),
+    )
+
+    # Round 14 Phase B — per-identity QueryAdvertiserAccount cache.
+    mcp_query_advertiser_cache_ttl: int = Field(
+        60,
+        alias="MCP_QUERY_ADVERTISER_CACHE_TTL",
+        description=(
+            "TTL in seconds for the per-identity "
+            "QueryAdvertiserAccount cache. Default 60s. Set to 0 to "
+            "disable caching entirely (every call hits upstream). "
+            "Cache is single-node in-memory; multi-node deployments "
+            "should disable or front with a shared cache."
+        ),
+    )
+    mcp_query_advertiser_cache_size: int = Field(
+        256,
+        alias="MCP_QUERY_ADVERTISER_CACHE_SIZE",
+        description=(
+            "Maximum number of cached QueryAdvertiserAccount entries "
+            "across all identities. LRU eviction. Default 256. Each "
+            "entry is a list of account records (~5-50KB), so 256 "
+            "entries is a soft worst-case of ~13MB resident."
+        ),
+    )
+
+    # OAuth Configuration (optional, for web-based authentication flows)
+    oauth_client_id: Optional[str] = Field(
+        None,
+        alias="OAUTH_CLIENT_ID",
+        description="OAuth Client ID for web authentication flow",
+    )
+    oauth_client_secret: Optional[str] = Field(
+        None,
+        alias="OAUTH_CLIENT_SECRET",
+        description="OAuth Client Secret for web authentication flow",
+    )
+    oauth_redirect_uri: Optional[str] = Field(
+        None,
+        alias="OAUTH_REDIRECT_URI",
+        description="OAuth Redirect URI for web authentication flow",
+    )
+
+    # Sampling Configuration (optional, for testing)
+    enable_sampling: bool = Field(
+        False,
+        alias="SAMPLING_ENABLED",
+        description="Enable request/response sampling for testing",
+    )
+    sampling_config_path: Optional[str] = Field(
+        None,
+        alias="SAMPLING_CONFIG_PATH",
+        description="Path to sampling configuration file",
+    )
+    default_sampling_rate: float = Field(
+        0.1,
+        alias="DEFAULT_SAMPLING_RATE",
+        description="Default sampling rate (0.0-1.0)",
+    )
+
+    # Code Mode Configuration
+    code_mode_enabled: bool = Field(
+        True,
+        alias="CODE_MODE",
+        description="Enable code mode (replaces tool catalog with meta-tools)",
+    )
+    code_mode_include_tags: bool = Field(
+        True,
+        alias="CODE_MODE_INCLUDE_TAGS",
+        description="Include tags browsing in code mode discovery (default true)",
+    )
+    code_mode_max_duration_secs: int = Field(
+        30,
+        alias="CODE_MODE_MAX_DURATION_SECS",
+        description="Sandbox execution timeout in seconds",
+    )
+    code_mode_max_memory: int = Field(
+        50_000_000,
+        alias="CODE_MODE_MAX_MEMORY",
+        description="Sandbox memory limit in bytes (default 50MB)",
+    )
+
+    # Background Tasks Configuration
+    enable_tasks: bool = Field(
+        True,
+        alias="ENABLE_TASKS",
+        description="Enable background task execution for long-running tools",
+    )
+
+    # Response Caching Configuration
+    enable_response_caching: bool = Field(
+        False,
+        alias="ENABLE_RESPONSE_CACHING",
+        description="Enable response caching for safe read-only tools",
+    )
+
+    # report_fields Tool (adsv1.md §E.2). Defaults ON; set to false to hide
+    # the packaged v1-catalog tool and fall back to list_report_fields only.
+    enable_report_fields_tool: bool = Field(
+        True,
+        alias="ENABLE_REPORT_FIELDS_TOOL",
+        description=(
+            "Enable the report_fields tool (packaged v1 catalog query/"
+            "validate). When disabled, list_report_fields still registers "
+            "and the AdsApiv1CreateReport async hint falls back to the "
+            "pre-PR guidance."
+        ),
+    )
+
+    # Debug Tools Exposure (hidden by default; on-demand for support).
+    amazon_ads_debug_tools: bool = Field(
+        False,
+        alias="AMAZON_ADS_DEBUG_TOOLS",
+        description=(
+            "Expose internal debug tools such as _report_fields_debug. "
+            "Leave disabled in production."
+        ),
+    )
+
+    # File Download Configuration
+    download_auth_token: Optional[str] = Field(
+        None,
+        validation_alias=AliasChoices(
+            "AMAZON_ADS_DOWNLOAD_AUTH_TOKEN", "DOWNLOAD_AUTH_TOKEN"
+        ),
+        description="Bearer token for authenticating download requests (optional)",
+    )
+    download_max_file_size: int = Field(
+        512 * 1024 * 1024,  # 512MB default
+        alias="AMAZON_ADS_DOWNLOAD_MAX_FILE_SIZE",
+        description="Maximum file size in bytes for downloads (default 512MB)",
+    )
+    download_allowed_extensions: Optional[str] = Field(
+        None,
+        alias="AMAZON_ADS_DOWNLOAD_ALLOWED_EXTENSIONS",
+        description="Comma-separated list of allowed file extensions (e.g., '.json,.csv,.gz')",
+    )
+
+    # Public URL resolution
+    public_base_url: Optional[str] = Field(
+        None,
+        alias="AMAZON_ADS_PUBLIC_BASE_URL",
+        description=(
+            "Absolute external URL of this server (e.g. 'https://ads.example.com'). "
+            "When set, all generated public links (downloads, OAuth callbacks) "
+            "use this value instead of attempting to infer it from request headers. "
+            "Required for any deployment where the server sits behind a proxy or "
+            "load balancer."
+        ),
+    )
+    trust_forwarded_headers: bool = Field(
+        False,
+        alias="AMAZON_ADS_TRUST_FORWARDED_HEADERS",
+        description=(
+            "If true, honor X-Forwarded-Proto / X-Forwarded-Host from the client. "
+            "Only enable this when the server is behind a proxy that strips or "
+            "rewrites these headers from untrusted callers. Enabling it on a "
+            "directly exposed server allows any client to forge public URLs."
+        ),
+    )
+
+    @field_validator("auth_method")
+    @classmethod
+    def auto_detect_auth_method(cls, v: str, info) -> str:
+        """Auto-detect authentication method based on available credentials.
+
+        If direct Amazon Ads API credentials are provided, automatically
+        switch to 'direct' auth method. Prioritizes direct credentials
+        over OpenBridge when both are available.
+
+        :param v: The original auth method value
+        :type v: str
+        :param info: Validation info containing other field values
+        :type info: Any
+        :return: Detected or original authentication method
+        :rtype: str
+        """
+        # Get the credential values
+        client_id = info.data.get("ad_api_client_id") or info.data.get(
+            "amazon_ads_client_id"
+        )
+        client_secret = info.data.get("ad_api_client_secret") or info.data.get(
+            "amazon_ads_client_secret"
+        )
+        refresh_token = info.data.get("ad_api_refresh_token") or info.data.get(
+            "amazon_ads_refresh_token"
+        )
+
+        # Check for direct API credentials (all three must be present and non-empty)
+        has_direct_creds = all(
+            [
+                client_id and client_id.strip(),
+                client_secret and client_secret.strip(),
+                refresh_token and refresh_token.strip(),
+            ]
+        )
+
+        if has_direct_creds:
+            return "direct"
+
+        # Check for OpenBridge credentials
+        has_openbridge = info.data.get("openbridge_refresh_token")
+        if has_openbridge and has_openbridge.strip():
+            return "openbridge"
+
+        # Check for partial direct credentials to provide helpful error
+        has_partial_direct = any([client_id, client_secret, refresh_token])
+        if has_partial_direct and not has_openbridge:
+            missing = []
+            if not client_id or not client_id.strip():
+                missing.append("AMAZON_AD_API_CLIENT_ID")
+            if not client_secret or not client_secret.strip():
+                missing.append("AMAZON_AD_API_CLIENT_SECRET")
+            if not refresh_token or not refresh_token.strip():
+                missing.append("AMAZON_AD_API_REFRESH_TOKEN")
+
+            if missing:
+                # Return the original value, the provider setup will give detailed error
+                return v
+
+        return v  # Return the original value if no credentials detected
+
+    @field_validator("amazon_ads_api_base_url")
+    @classmethod
+    def validate_api_base_url(cls, v: str, info) -> str:
+        """Adjust API URL based on sandbox mode.
+
+        Automatically modifies the API base URL to use the test endpoint
+        when sandbox mode is enabled.
+
+        :param v: The original API base URL
+        :type v: str
+        :param info: Validation info containing other field values
+        :type info: Any
+        :return: Modified API base URL for sandbox mode if enabled
+        :rtype: str
+        """
+        if info.data.get("amazon_ads_sandbox_mode"):
+            return v.replace("advertising-api", "advertising-api-test")
+        return v
+
+    @property
+    def effective_client_id(self) -> Optional[str]:
+        """Get the effective client ID (new or legacy).
+
+        Returns the client ID from either the new AMAZON_AD_API_CLIENT_ID
+        environment variable or the legacy amazon_ads_client_id.
+
+        :return: Effective client ID or None
+        :rtype: Optional[str]
+        """
+        return self.ad_api_client_id or self.amazon_ads_client_id
+
+    @property
+    def effective_client_secret(self) -> Optional[str]:
+        """Get the effective client secret (new or legacy).
+
+        Returns the client secret from either the new AMAZON_AD_API_CLIENT_SECRET
+        environment variable or the legacy amazon_ads_client_secret.
+
+        :return: Effective client secret or None
+        :rtype: Optional[str]
+        """
+        return self.ad_api_client_secret or self.amazon_ads_client_secret
+
+    @property
+    def effective_refresh_token(self) -> Optional[str]:
+        """Get the effective refresh token (new or legacy).
+
+        Returns the refresh token from either the new AMAZON_AD_API_REFRESH_TOKEN
+        environment variable or the legacy amazon_ads_refresh_token.
+
+        NOTE: Using refresh tokens via environment variables is deprecated.
+        Prefer OAuth flow or secure token storage for production use.
+
+        :return: Effective refresh token or None
+        :rtype: Optional[str]
+        """
+        token = self.ad_api_refresh_token or self.amazon_ads_refresh_token
+        if token:
+            import warnings
+
+            warnings.warn(
+                "Using refresh tokens via environment variables is deprecated and insecure. "
+                "Please use OAuth flow or secure token storage instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        return token
+
+    @property
+    def effective_profile_id(self) -> Optional[str]:
+        """Get the effective profile ID.
+
+        Returns the profile ID from the AMAZON_AD_API_PROFILE_ID
+        environment variable.
+
+        :return: Profile ID or None
+        :rtype: Optional[str]
+        """
+        return self.ad_api_profile_id
+
+    @property
+    def region_endpoint(self) -> str:
+        """Get the region-specific endpoint.
+
+        Returns the appropriate Amazon Ads API endpoint based on the
+        configured region and sandbox mode setting.
+
+        :return: Region-specific API endpoint URL
+        :rtype: str
+        """
+        base = RegionConfig.get_api_endpoint(self.amazon_ads_region)
+        if self.amazon_ads_sandbox_mode:
+            base = base.replace("advertising-api", "advertising-api-test")
+        return base
+
+
+settings = Settings()
+"""Global settings instance for the Amazon Ads MCP server.
+
+This instance is created once and used throughout the application
+to access configuration settings.
+"""

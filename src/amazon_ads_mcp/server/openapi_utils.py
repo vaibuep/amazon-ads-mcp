@@ -1,0 +1,683 @@
+"""OpenAPI utilities for the MCP server.
+
+This module provides utilities for processing OpenAPI specifications,
+including slimming large descriptions and managing spec resources.
+"""
+
+import copy
+import logging
+import os
+from typing import Any, Dict, Optional, Set
+
+logger = logging.getLogger(__name__)
+
+
+def truncate_text(text: Optional[str], max_len: int) -> Optional[str]:
+    """Truncate text to a maximum length with ellipsis.
+
+    :param text: Text to truncate
+    :type text: Optional[str]
+    :param max_len: Maximum length
+    :type max_len: int
+    :return: Truncated text or original if shorter
+    :rtype: Optional[str]
+    """
+    if not isinstance(text, str):
+        return text
+    if len(text) <= max_len:
+        return text
+    tail = "…"
+    return text[: max(0, max_len - len(tail))] + tail
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    """Return True if an environment variable is set to a truthy value.
+
+    :param name: Environment variable name.
+    :param default: Value when the variable is unset. Defaults to False.
+    """
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.lower() in ("1", "true", "yes")
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers for Phases 2-4
+# ---------------------------------------------------------------------------
+
+def _collect_all_refs(obj: Any, refs: Set[str]) -> None:
+    """Recursively collect all ``$ref`` targets from a JSON-like structure."""
+    if isinstance(obj, dict):
+        ref = obj.get("$ref")
+        if isinstance(ref, str) and ref.startswith("#/"):
+            refs.add(ref)
+        for value in obj.values():
+            _collect_all_refs(value, refs)
+    elif isinstance(obj, list):
+        for item in obj:
+            _collect_all_refs(item, refs)
+
+
+def _resolve_transitive_refs(spec: Dict[str, Any], refs: Set[str]) -> Set[str]:
+    """Expand *refs* to include transitively referenced schemas."""
+    schemas = spec.get("components", {}).get("schemas", {})
+    resolved: Set[str] = set()
+    queue = list(refs)
+
+    while queue:
+        ref = queue.pop()
+        if ref in resolved:
+            continue
+        resolved.add(ref)
+        # Only follow component/schema refs
+        prefix = "#/components/schemas/"
+        if not ref.startswith(prefix):
+            continue
+        name = ref[len(prefix):]
+        schema = schemas.get(name)
+        if not isinstance(schema, dict):
+            continue
+        nested: Set[str] = set()
+        _collect_all_refs(schema, nested)
+        for nr in nested:
+            if nr not in resolved:
+                queue.append(nr)
+
+    return resolved
+
+
+def _strip_response_bodies(spec: Dict[str, Any]) -> None:
+    """Phase 2: Strip response *content* (schemas) while keeping valid stubs.
+
+    OpenAPI 3.0 requires ``responses`` on every operation, so we cannot
+    remove the key entirely.  Instead we keep status codes and descriptions
+    but drop ``content``, ``headers``, and ``links`` - the heavy parts that
+    FastMCP uses to build ``outputSchema``.
+    """
+    for _path, methods in (spec.get("paths") or {}).items():
+        if not isinstance(methods, dict):
+            continue
+        for method, op in methods.items():
+            if not isinstance(op, dict):
+                continue
+            responses = op.get("responses")
+            if not isinstance(responses, dict):
+                continue
+            for status, response in responses.items():
+                if isinstance(response, dict):
+                    desc = response.get("description", "OK")
+                    response.clear()
+                    response["description"] = desc
+
+    components = spec.get("components")
+    if isinstance(components, dict):
+        components.pop("responses", None)
+
+
+def _eliminate_dead_schemas(spec: Dict[str, Any]) -> None:
+    """Phase 3: Remove component schemas not referenced anywhere in the spec."""
+    schemas = spec.get("components", {}).get("schemas", {})
+    if not schemas:
+        return
+
+    # Collect every $ref in paths + non-schema components
+    live_refs: Set[str] = set()
+    _collect_all_refs(spec.get("paths", {}), live_refs)
+    components = spec.get("components", {})
+    for section in ("parameters", "requestBodies", "headers"):
+        _collect_all_refs(components.get(section, {}), live_refs)
+
+    # Expand transitively
+    live_refs = _resolve_transitive_refs(spec, live_refs)
+
+    # Schema names that are still alive
+    alive = {
+        ref.split("/")[-1]
+        for ref in live_refs
+        if ref.startswith("#/components/schemas/")
+    }
+
+    for name in list(schemas.keys()):
+        if name not in alive:
+            del schemas[name]
+
+
+def _clean_schema_metadata(obj: Any) -> None:
+    """Phase 4: Strip noise fields from all schemas (component and inline)."""
+    noise_keys = {"title", "xml", "deprecated", "example", "examples", "externalDocs"}
+    if isinstance(obj, dict):
+        for key in noise_keys:
+            obj.pop(key, None)
+        for value in obj.values():
+            _clean_schema_metadata(value)
+    elif isinstance(obj, list):
+        for item in obj:
+            _clean_schema_metadata(item)
+
+
+def _truncate_enums(
+    spec: Dict[str, Any],
+    max_values: int = 8,
+    min_values_to_truncate: int = 12,
+) -> int:
+    """Phase 5: Truncate large enum arrays in component schemas.
+
+    Enums with many values (e.g. LanguageLocale with 166 entries) get
+    dereferenced inline by FastMCP, bloating every tool that references
+    them.  We keep *max_values* representative samples plus a
+    ``description`` note indicating the total count was trimmed.
+
+    Only modifies enum arrays with more than *min_values_to_truncate*
+    entries to avoid touching small enums that are useful in full.
+
+    :return: Number of enums truncated.
+    """
+    schemas = spec.get("components", {}).get("schemas", {})
+    truncated = 0
+
+    for name, schema in schemas.items():
+        if not isinstance(schema, dict):
+            continue
+        enum_vals = schema.get("enum")
+        if not isinstance(enum_vals, list):
+            continue
+        if len(enum_vals) <= min_values_to_truncate:
+            continue
+
+        original_len = len(enum_vals)
+        # Keep first few + last few for representative spread
+        head = max_values // 2
+        tail = max_values - head
+        kept = enum_vals[:head] + enum_vals[-tail:]
+        schema["enum"] = kept
+        # Append note to description so Claude knows there are more
+        desc = schema.get("description", "")
+        note = f" [{original_len} values total, showing {max_values}]"
+        schema["description"] = (desc + note).strip()
+        truncated += 1
+
+    return truncated
+
+
+def _simplify_large_oneof(
+    spec: Dict[str, Any],
+    max_options: int = 6,
+    min_options_to_simplify: int = 10,
+) -> int:
+    """Phase 6: Simplify large oneOf/anyOf compositions in component schemas.
+
+    Compositions like ``CreateTargetDetails`` with 23 inline wrapper
+    objects generate thousands of tokens after FastMCP dereferences them.
+    We replace the full list with a trimmed set of options plus a
+    description note.
+
+    :return: Number of compositions simplified.
+    """
+    schemas = spec.get("components", {}).get("schemas", {})
+    simplified = 0
+
+    for name, schema in schemas.items():
+        if not isinstance(schema, dict):
+            continue
+
+        for key in ("oneOf", "anyOf"):
+            options = schema.get(key)
+            if not isinstance(options, list):
+                continue
+            if len(options) <= min_options_to_simplify:
+                continue
+
+            original_len = len(options)
+
+            # Extract option names for the description note
+            option_names = []
+            for opt in options:
+                if isinstance(opt, dict):
+                    # Inline wrapper: {"properties": {"keywordTarget": ...}}
+                    props = opt.get("properties", {})
+                    if props:
+                        option_names.extend(props.keys())
+                    # Direct $ref
+                    ref = opt.get("$ref", "")
+                    if ref:
+                        option_names.append(ref.split("/")[-1])
+
+            # Keep first few options for structure, discard the rest
+            schema[key] = options[:max_options]
+            desc = schema.get("description", "")
+            all_names = ", ".join(option_names)
+            note = (
+                f" [{original_len} types total, showing {max_options}. "
+                f"All types: {all_names}]"
+            )
+            schema["description"] = (desc + note).strip()
+            simplified += 1
+
+    return simplified
+
+
+def _flatten_large_schemas(
+    spec: Dict[str, Any],
+    max_schema_bytes: int = 1500,
+) -> int:
+    """Phase 7: Flatten large component schemas to reduce token bloat.
+
+    FastMCP dereferences ``$ref`` chains across multiple component
+    schemas, so even a 3-level-deep schema can expand to 10K+ tokens
+    when inlined.  This phase targets the source: any component schema
+    whose JSON serialization exceeds *max_schema_bytes* gets its nested
+    ``properties`` replaced with type-only stubs.
+
+    For example, a schema like::
+
+        CreateAssetBasedCreativeSettings:
+          properties:
+            headline: {type: string, maxLength: 200, ...}
+            customImage: {type: object, properties: {assetId: ...}}
+            videoCallToActionSettings: {type: object, properties: ...}
+
+    becomes::
+
+        CreateAssetBasedCreativeSettings:
+          description: "... [flattened: headline, customImage, videoCallToActionSettings]"
+          properties:
+            headline: {type: string}
+            customImage: {type: object}
+            videoCallToActionSettings: {type: object}
+
+    This preserves the property *names* and top-level *types* so Claude
+    knows what fields exist, while eliminating the nested definitions
+    that explode token usage.
+
+    :return: Number of schemas flattened.
+    """
+    import json as _json
+
+    schemas = spec.get("components", {}).get("schemas", {})
+    flattened = 0
+
+    for name, schema in list(schemas.items()):
+        if not isinstance(schema, dict):
+            continue
+        # Skip enum-only schemas (already handled by Phase 5)
+        if "enum" in schema and "properties" not in schema:
+            continue
+
+        raw = _json.dumps(schema, separators=(",", ":"))
+        if len(raw) <= max_schema_bytes:
+            continue
+
+        props = schema.get("properties")
+        if not isinstance(props, dict) or not props:
+            continue
+
+        # Build a slim version: keep property names + type only
+        slim_props: Dict[str, Any] = {}
+        prop_names = []
+        for pname, pdef in props.items():
+            prop_names.append(pname)
+            if not isinstance(pdef, dict):
+                slim_props[pname] = pdef
+                continue
+
+            slim: Dict[str, Any] = {}
+            # Preserve type
+            if "type" in pdef:
+                slim["type"] = pdef["type"]
+            elif "$ref" in pdef:
+                slim["type"] = "object"
+            elif "oneOf" in pdef or "anyOf" in pdef:
+                slim["type"] = "object"
+            elif "items" in pdef:
+                slim["type"] = "array"
+                # Keep items type hint
+                items = pdef["items"]
+                if isinstance(items, dict):
+                    if "type" in items:
+                        slim["items"] = {"type": items["type"]}
+                    else:
+                        slim["items"] = {"type": "object"}
+            else:
+                slim["type"] = "object"
+
+            # Keep enum if small
+            if "enum" in pdef and isinstance(pdef["enum"], list):
+                if len(pdef["enum"]) <= 8:
+                    slim["enum"] = pdef["enum"]
+
+            # Keep format for strings (date, date-time, etc.)
+            if "format" in pdef:
+                slim["format"] = pdef["format"]
+
+            # Preserve short description if available
+            desc = pdef.get("description", "")
+            if desc and len(desc) <= 80:
+                slim["description"] = desc
+
+            slim_props[pname] = slim
+
+        # Add required list if present
+        new_schema: Dict[str, Any] = {"type": "object", "properties": slim_props}
+        if "required" in schema:
+            new_schema["required"] = schema["required"]
+
+        # Annotate with original property list
+        desc = schema.get("description", "")
+        note = f" [flattened: {', '.join(prop_names)}]"
+        new_schema["description"] = (desc + note).strip()
+
+        schemas[name] = new_schema
+        flattened += 1
+
+    return flattened
+
+
+def _validate_request_schemas(spec: Dict[str, Any]) -> bool:
+    """Return True if every requestBody schema is non-empty.
+
+    A schema is "non-empty" if it has at least one of ``type``, ``$ref``,
+    or ``properties``.
+    """
+    for _path, methods in (spec.get("paths") or {}).items():
+        if not isinstance(methods, dict):
+            continue
+        for method, op in methods.items():
+            if not isinstance(op, dict):
+                continue
+            req = op.get("requestBody")
+            if not isinstance(req, dict):
+                continue
+            content = req.get("content")
+            if not isinstance(content, dict):
+                continue
+            for _media, media_obj in content.items():
+                if not isinstance(media_obj, dict):
+                    continue
+                schema = media_obj.get("schema")
+                if isinstance(schema, dict) and not (
+                    schema.get("type")
+                    or schema.get("$ref")
+                    or schema.get("properties")
+                ):
+                    return False
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def _normalize_nullable_for_openapi30(spec: Dict[str, Any]) -> None:
+    """Convert OpenAPI 3.1-style nullable to OpenAPI 3.0-style.
+
+    OpenAPI 3.0 does not support ``type: "null"`` in ``anyOf``.  Instead it
+    uses ``nullable: true``.  FastMCP's pydantic-based parser validates
+    against 3.0 rules and rejects ``type: "null"``.
+
+    This function walks the entire spec and converts patterns like::
+
+        anyOf: [{type: string}, {type: null}]
+
+    into::
+
+        type: string
+        nullable: true
+
+    It also removes stray ``properties: {}`` that the LLM optimizer may
+    inject into simple type schemas.
+    """
+    version = str(spec.get("openapi", "3.0"))
+    if version.startswith("3.1"):
+        return  # 3.1 supports type: null natively
+
+    def _walk(obj: Any) -> None:
+        if isinstance(obj, dict):
+            # Remove empty properties added by optimizer to simple schemas
+            if obj.get("properties") == {} and obj.get("type") in (
+                "string", "number", "integer", "boolean", "null",
+            ):
+                del obj["properties"]
+
+            # Convert anyOf: [{type: X}, {type: null}] → {type: X, nullable: true}
+            any_of = obj.get("anyOf")
+            if isinstance(any_of, list) and len(any_of) == 2:
+                non_null = [v for v in any_of if isinstance(v, dict) and v.get("type") != "null"]
+                has_null = any(isinstance(v, dict) and v.get("type") == "null" for v in any_of)
+                if has_null and len(non_null) == 1:
+                    # Merge the non-null variant into the parent, add nullable
+                    merged = non_null[0]
+                    # Remove stray empty properties from merged
+                    if merged.get("properties") == {}:
+                        del merged["properties"]
+                    del obj["anyOf"]
+                    obj.update(merged)
+                    obj["nullable"] = True
+
+            # Recurse into all values
+            for value in list(obj.values()):
+                _walk(value)
+        elif isinstance(obj, list):
+            for item in obj:
+                _walk(item)
+
+    _walk(spec.get("components", {}))
+    # Also walk inline schemas in paths
+    _walk(spec.get("paths", {}))
+
+
+def slim_openapi_for_tools(spec: Dict[str, Any], max_desc: int = 200) -> None:
+    """Reduce large descriptions in OpenAPI operations and parameters.
+
+    This helps keep tool metadata small when clients ingest tool definitions.
+    Modifies the spec in place.
+
+    **Phase 0** (always): Normalize nullable fields for OpenAPI 3.0 compat.
+    **Phase 1** (always): Auth header removal + description truncation.
+    **Phase 2** (on by default, ``SLIM_OPENAPI_STRIP_RESPONSES=false`` to disable): Strip response bodies.
+    **Phase 3-7** (on by default, ``SLIM_OPENAPI_AGGRESSIVE=false`` to disable): Dead schema elimination,
+    metadata cleanup, enum truncation, oneOf simplification, and large schema flattening.
+
+    :param spec: OpenAPI specification to slim
+    :type spec: Dict[str, Any]
+    :param max_desc: Maximum description length
+    :type max_desc: int
+    """
+    try:
+        # ----------------------------------------------------------------
+        # Phase 0 - Normalize nullable for OpenAPI 3.0 (always)
+        # ----------------------------------------------------------------
+        _normalize_nullable_for_openapi30(spec)
+
+        # ----------------------------------------------------------------
+        # Phase 1 - Auth header removal + description truncation (always)
+        # ----------------------------------------------------------------
+        auth_header_names = {
+            "Authorization",
+            # Legacy v2 header naming
+            "Amazon-Advertising-API-ClientId",
+            "Amazon-Advertising-API-Scope",
+            # New AdsAPIv1 header naming (auto-injected by auth middleware;
+            # normalized from the legacy names in utils/http_client.py)
+            "Amazon-Ads-ClientId",
+            "Amazon-Ads-AccountId",
+            "Amazon-Ads-Manager-AccountId",
+        }
+        auth_parameter_keys: set[str] = set()
+
+        def resolve_local_ref(ref: str) -> Any:
+            if not ref.startswith("#/"):
+                return None
+            current: Any = spec
+            for part in ref[2:].split("/"):
+                if not isinstance(current, dict) or part not in current:
+                    return None
+                current = current[part]
+            return current
+
+        def is_auth_parameter_ref(ref: str) -> bool:
+            if not ref.startswith("#/components/parameters/"):
+                return False
+            key = ref.split("/")[-1]
+            return key in auth_parameter_keys
+
+        def is_auth_header_param(param: Dict[str, Any]) -> bool:
+            if (
+                param.get("in") == "header"
+                and param.get("name") in auth_header_names
+            ):
+                return True
+
+            ref = param.get("$ref")
+            if isinstance(ref, str) and ref.startswith("#/"):
+                if is_auth_parameter_ref(ref):
+                    return True
+                resolved = resolve_local_ref(ref)
+                if isinstance(resolved, dict):
+                    return (
+                        resolved.get("in") == "header"
+                        and resolved.get("name") in auth_header_names
+                    )
+            return False
+
+        spec.pop("externalDocs", None)
+
+        # Fix server URLs that have descriptions in them
+        if "servers" in spec and isinstance(spec["servers"], list):
+            fixed_servers = []
+            for server in spec["servers"]:
+                if isinstance(server, dict) and "url" in server:
+                    url = server["url"]
+                    # Extract just the URL part if it contains description
+                    if " (" in url:
+                        url = url.split(" (")[0].strip()
+                    fixed_servers.append({"url": url})
+            if fixed_servers:
+                # Use the first server as default (North America)
+                spec["servers"] = [fixed_servers[0]]
+
+        # Remove auth header params that are supplied by auth middleware/client
+        components = spec.get("components")
+        if isinstance(components, dict):
+            params = components.get("parameters")
+            if isinstance(params, dict):
+                for key, param in params.items():
+                    if isinstance(param, dict) and is_auth_header_param(param):
+                        auth_parameter_keys.add(key)
+
+        for p, methods in (spec.get("paths") or {}).items():
+            if not isinstance(methods, dict):
+                continue
+
+            # Path-item parameters
+            path_params = methods.get("parameters") or []
+            if isinstance(path_params, list):
+                filtered_path_params = []
+                for prm in path_params:
+                    if isinstance(prm, dict) and "description" in prm:
+                        prm["description"] = truncate_text(prm.get("description"), max_desc)
+                    if isinstance(prm, dict) and is_auth_header_param(prm):
+                        continue
+                    filtered_path_params.append(prm)
+                methods["parameters"] = filtered_path_params
+
+            for m, op in list(methods.items()):
+                if not isinstance(op, dict):
+                    continue
+                # Trim top-level description
+                if "description" in op:
+                    op["description"] = truncate_text(op.get("description"), max_desc)
+                # Prefer summary if description missing or too long
+                if not op.get("description") and op.get("summary"):
+                    op["description"] = truncate_text(op.get("summary"), max_desc)
+                op.pop("externalDocs", None)
+                # Parameters
+                params = op.get("parameters") or []
+                if isinstance(params, list):
+                    filtered_params = []
+                    for prm in params:
+                        if isinstance(prm, dict) and "description" in prm:
+                            prm["description"] = truncate_text(
+                                prm.get("description"), max_desc
+                            )
+                        if isinstance(prm, dict) and is_auth_header_param(prm):
+                            continue
+                        filtered_params.append(prm)
+                    op["parameters"] = filtered_params
+                # Request body description
+                req = op.get("requestBody")
+                if isinstance(req, dict) and "description" in req:
+                    req["description"] = truncate_text(req.get("description"), max_desc)
+
+        if auth_parameter_keys and isinstance(components, dict):
+            params = components.get("parameters")
+            if isinstance(params, dict):
+                for key in auth_parameter_keys:
+                    params.pop(key, None)
+
+        # ----------------------------------------------------------------
+        # Phases 2-4 - Gated behind env flags (default off)
+        # ----------------------------------------------------------------
+        strip_responses = _env_flag("SLIM_OPENAPI_STRIP_RESPONSES", default=True)
+        aggressive = _env_flag("SLIM_OPENAPI_AGGRESSIVE", default=True)
+
+        if strip_responses or aggressive:
+            # Snapshot for safety rollback
+            snapshot = copy.deepcopy(spec)
+
+            # Phase 2 - Strip response bodies
+            if strip_responses:
+                _strip_response_bodies(spec)
+
+            # Phase 3 - Dead schema elimination
+            if aggressive:
+                _eliminate_dead_schemas(spec)
+
+            # Phase 4 - Clean schema metadata
+            if aggressive:
+                _clean_schema_metadata(spec.get("components", {}).get("schemas", {}))
+                # Also clean inline schemas in paths
+                for _path, methods in (spec.get("paths") or {}).items():
+                    if not isinstance(methods, dict):
+                        continue
+                    for method, op in methods.items():
+                        if not isinstance(op, dict):
+                            continue
+                        req = op.get("requestBody")
+                        if isinstance(req, dict):
+                            _clean_schema_metadata(req)
+                        for prm in op.get("parameters") or []:
+                            if isinstance(prm, dict) and "schema" in prm:
+                                _clean_schema_metadata(prm["schema"])
+
+            # Phase 5 - Truncate large enums (e.g. LanguageLocale 166→8)
+            if aggressive:
+                n_enums = _truncate_enums(spec)
+                if n_enums:
+                    logger.debug("Truncated %d large enum schemas", n_enums)
+
+            # Phase 6 - Simplify large oneOf/anyOf compositions
+            if aggressive:
+                n_oneof = _simplify_large_oneof(spec)
+                if n_oneof:
+                    logger.debug("Simplified %d large oneOf/anyOf schemas", n_oneof)
+
+            # Phase 7 - Flatten large schemas to reduce dereference bloat
+            if aggressive:
+                n_flat = _flatten_large_schemas(spec, max_schema_bytes=1500)
+                if n_flat:
+                    logger.debug(
+                        "Flattened %d large schemas to property stubs", n_flat
+                    )
+
+            # Safety: validate requestBody schemas are non-empty
+            if not _validate_request_schemas(spec):
+                logger.warning(
+                    "Aggressive slim produced empty requestBody schema; reverted"
+                )
+                spec.clear()
+                spec.update(snapshot)
+
+    except Exception:
+        # Do not fail mounting if slimming fails
+        pass

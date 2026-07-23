@@ -1,0 +1,146 @@
+"""Wire-path regression test: AuthenticatedClient against a real DSP spec.
+
+PR #71's spec-contract tests (`tests/unit/test_accept_resolver_against_spec.py`)
+prove the resolver picks the right Accept value for DSP multi-version operations
+when given the right `accepts` list. This test proves the full pipeline:
+real ``AuthenticatedClient`` → real ``MediaTypeRegistry`` populated from the
+shipped ``dist/openapi/resources/AmazonDSPConversions.json`` → ``_inject_headers``
+→ wire ``Accept`` value captured by intercepting ``httpx.AsyncClient.send``.
+
+Without this test, CI has wire-path coverage only for SponsoredProducts
+(via ``tests/unit/test_client_accept_resolver.py``); a regression on DSP
+specifically — a different code path through the registry — could ship silently.
+
+Auth is fully mocked (mirrors the ``test_client_accept_resolver.py`` pattern):
+the test never reads env credentials and never touches the network. Stays
+deterministic across machines and CI environments.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from unittest.mock import MagicMock
+
+import httpx
+import pytest
+import respx
+
+from amazon_ads_mcp.utils.http_client import AuthenticatedClient
+from amazon_ads_mcp.utils.media import MediaTypeRegistry
+
+from tests.conftest import make_direct_auth_manager
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_DSP_CONVERSIONS_SPEC = (
+    _REPO_ROOT / "dist" / "openapi" / "resources" / "AmazonDSPConversions.json"
+)
+
+
+@pytest.fixture
+def dsp_conversions_registry() -> MediaTypeRegistry:
+    if not _DSP_CONVERSIONS_SPEC.exists():
+        pytest.skip(f"DSP Conversions spec not found at {_DSP_CONVERSIONS_SPEC}")
+    with open(_DSP_CONVERSIONS_SPEC) as f:
+        spec = json.load(f)
+    reg = MediaTypeRegistry()
+    reg.add_from_spec(spec)
+    return reg
+
+
+@pytest.fixture
+def mocked_auth_manager() -> MagicMock:
+    """Fully mocked auth manager — deterministic, no env credential reads.
+
+    Mirrors the pattern in tests/unit/test_client_accept_resolver.py so the
+    wire-path test stays consistent with the existing wire-path tests.
+    Both manager and provider are spec'd so attribute typos and API renames
+    fail at test time rather than producing silent child Mocks."""
+    return make_direct_auth_manager(headers={
+        "Authorization": "Bearer test",
+        "Amazon-Advertising-API-ClientId": "test-client-id",
+    })
+
+
+@pytest.mark.asyncio
+async def test_dsp_conversions_list_sends_v2_accept_on_wire(
+    dsp_conversions_registry: MediaTypeRegistry,
+    mocked_auth_manager: MagicMock,
+) -> None:
+    """`dspAmazonListConversionDefinitions` declares v1 and v2 in the spec.
+    Resolver should pick v2 (the headline regression class). This test
+    proves the v2 selection survives the full ``AuthenticatedClient.send``
+    code path — not just the unit-level resolver call.
+
+    If the resolver is removed, modified to pick v1 again, or if
+    ``_inject_headers`` stops calling ``resolve_accept``, this test fails
+    on the wire Accept value."""
+    client = AuthenticatedClient(
+        auth_manager=mocked_auth_manager,
+        media_registry=dsp_conversions_registry,
+    )
+    request = client.build_request(
+        "POST",
+        "https://advertising-api.amazon.com/accounts/123/dsp/conversionDefinitions/list",
+        json={},
+    )
+
+    # respx intercepts at httpx's transport layer — sees the fully
+    # serialized wire request, including header case + JSON body bytes.
+    # Catches request-construction bugs that ``patch.object(send)``
+    # is structurally blind to.
+    with respx.mock(assert_all_called=True) as respx_mock:
+        route = respx_mock.post(
+            "https://advertising-api.amazon.com/accounts/123/"
+            "dsp/conversionDefinitions/list"
+        ).mock(return_value=httpx.Response(200))
+
+        await client.send(request)
+
+        # Inspect the actual request as sent on the wire
+        sent = route.calls.last.request
+        accept = sent.headers.get("Accept")
+
+    assert accept == "application/vnd.dspconversiondefinition.v2+json", (
+        f"DSP wire-path regression: expected v2 Accept, got {accept!r}. "
+        f"Resolver may have regressed or _inject_headers may no longer be "
+        f"calling resolve_accept."
+    )
+
+
+@pytest.mark.asyncio
+async def test_dsp_conversions_caller_pinned_v1_preserved_on_wire(
+    dsp_conversions_registry: MediaTypeRegistry,
+    mocked_auth_manager: MagicMock,
+) -> None:
+    """A tool that explicitly pins ``Accept: …v1+json`` keeps v1 even when
+    the resolver would auto-upgrade to v2. Resolver rule 1 (caller-pinned
+    vendored is preserved unconditionally) must hold on the wire. This is
+    the spec-driven escape hatch the design depends on for any operation
+    where the algorithm picks wrong."""
+    client = AuthenticatedClient(
+        auth_manager=mocked_auth_manager,
+        media_registry=dsp_conversions_registry,
+    )
+    pinned = "application/vnd.dspconversiondefinition.v1+json"
+    request = client.build_request(
+        "POST",
+        "https://advertising-api.amazon.com/accounts/123/dsp/conversionDefinitions/list",
+        headers={"Accept": pinned},
+        json={},
+    )
+
+    with respx.mock(assert_all_called=True) as respx_mock:
+        route = respx_mock.post(
+            "https://advertising-api.amazon.com/accounts/123/"
+            "dsp/conversionDefinitions/list"
+        ).mock(return_value=httpx.Response(200))
+
+        await client.send(request)
+
+        accept = route.calls.last.request.headers.get("Accept")
+
+    assert accept == pinned, (
+        f"Caller-pinned vendored Accept was clobbered: expected {pinned!r}, "
+        f"got {accept!r}. Resolver rule 1 may have regressed."
+    )

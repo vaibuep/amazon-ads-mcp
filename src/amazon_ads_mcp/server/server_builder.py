@@ -1,0 +1,1190 @@
+"""Server builder module for creating configured MCP servers.
+
+This module handles the complex server initialization process,
+including middleware setup, client configuration, and resource mounting.
+"""
+
+import logging
+import os
+from pathlib import Path
+from typing import Dict, List, Optional
+
+from fastmcp import FastMCP
+from fastmcp.server.middleware.error_handling import ErrorHandlingMiddleware
+
+from .. import __version__
+from ..auth.manager import get_auth_manager
+from ..config.settings import settings
+from ..middleware.authentication import (
+    AuthSessionStateMiddleware,
+    create_auth_middleware,
+    create_openbridge_config,
+)
+
+try:
+    from ..middleware.oauth import create_oauth_middleware
+except ImportError:
+    create_oauth_middleware = None
+from ..utils.header_resolver import HeaderNameResolver
+from ..utils.http_client import AuthenticatedClient
+from ..utils.media import MediaTypeRegistry
+from ..utils.region_config import RegionConfig
+from .openapi_utils import slim_openapi_for_tools
+from .sidecar_loader import _json_load as json_load
+
+logger = logging.getLogger(__name__)
+
+
+
+class ServerBuilder:
+    """Builder class for creating configured MCP servers.
+
+    This class encapsulates the complex server setup process,
+    making it easier to test and maintain.
+    """
+
+    def __init__(self, lifespan=None):
+        """Initialize the server builder.
+
+        :param lifespan: Optional async context manager for server lifespan.
+                        If provided, handles startup/shutdown logic.
+        :type lifespan: Optional[Callable[[], AsyncContextManager]]
+        """
+        # Parser flag will be set at runtime in main(), not at import time
+        self.server: Optional[FastMCP] = None
+        self.lifespan = lifespan  # Server lifespan context manager
+        self.auth_manager = get_auth_manager()
+        self.media_registry = MediaTypeRegistry()
+        self.header_resolver = HeaderNameResolver()
+        self.mounted_servers: Dict[str, List[FastMCP]] = {}
+        self.group_tool_counts: Dict[str, int] = {}
+        # Set by _mount_resource_servers; the sidecar middleware reuses it
+        # so specs and transforms always come from the same tree.
+        self.resources_dir: Optional[Path] = None
+
+    async def build(self) -> FastMCP:
+        """Build and configure the MCP server.
+
+        :return: Configured FastMCP server instance
+        :rtype: FastMCP
+        """
+        code_mode = self._resolve_code_mode()
+
+        # Warn if both code mode and progressive disclosure are set
+        if code_mode and self._progressive_disclosure_enabled():
+            logger.warning(
+                "Both CODE_MODE and PROGRESSIVE_TOOL_DISCLOSURE are set. "
+                "Code mode supersedes progressive disclosure; tool groups will be skipped."
+            )
+
+        # Ensure default identity is loaded if configured
+        await self._setup_default_identity()
+
+        # Create the main server
+        self.server = await self._create_main_server()
+
+        # Setup middleware
+        await self._setup_middleware()
+
+        # Setup HTTP client
+        self.client = await self._setup_http_client()
+
+        # Mount resource servers
+        await self._mount_resource_servers()
+
+        # Sidecar transforms (arg_aliases etc.) must run BEFORE tool schema
+        # dispatch. The legacy sidecar_loader.attach_transforms_from_sidecars
+        # hook was no-op on current FastMCP (transform_tool removed); the
+        # middleware below restores those semantics for every spec under
+        # the resources directory we just mounted.
+        await self._register_sidecar_middleware()
+
+        # Progressive disclosure: disable mounted tools by default
+        # Skipped when code mode is active (tools must stay visible for CodeMode catalog)
+        if not code_mode:
+            await self._disable_mounted_tools()
+
+        # Setup built-in tools (skip tool group tools when code mode active)
+        await self._setup_builtin_tools(skip_tool_groups=code_mode)
+
+        # Strip outputSchema from all tools (saves ~3K tokens)
+        # Only affects output_schema; input schemas used by GetSchemas are preserved
+        await self._strip_output_schemas()
+
+        # Enrich async tool descriptions with polling hints
+        from .async_hints_transform import AsyncHintsTransform
+
+        self.server.add_transform(AsyncHintsTransform())
+
+        # B1 + F3: Surface per-ad-product caps and the "one ad product per
+        # call" constraint (adProductFilter.include maxItems=1) in the
+        # descriptions of QueryCampaign / QueryTarget family tools so
+        # agents see Amazon's real limits at schema-fetch time, not after
+        # a guaranteed first-call validation failure.
+        from .ad_product_cap_hints_transform import AdProductCapHintsTransform
+
+        self.server.add_transform(AdProductCapHintsTransform())
+
+        # Code mode: tag tools by category then apply CodeMode transform
+        if code_mode:
+            await self._tag_tools_for_code_mode()
+            await self._apply_code_mode()
+
+        # Setup built-in prompts
+        await self._setup_builtin_prompts()
+
+        # Setup OAuth callback route for HTTP transport
+        await self._setup_oauth_callback()
+
+        # Setup file download routes for HTTP transport
+        await self._setup_file_routes()
+
+        # Setup health check endpoint for container orchestration
+        await self._setup_health_check()
+
+        return self.server
+
+    def _resolve_code_mode(self) -> bool:
+        """Resolve whether code mode is BOTH requested and runnable.
+
+        Probes the code-mode extra BEFORE any code-mode-conditional decision
+        in ``build()`` (progressive disclosure, tool-group builtins).
+        ``CODE_MODE`` defaults to on but the base install does not pull the
+        extra; downgrading here yields genuine ``CODE_MODE=false`` behavior
+        instead of a full always-enabled catalog with the tool-group
+        builtins missing (issue #91's silent-disconnect follow-up).
+        """
+        if not settings.code_mode_enabled:
+            return False
+
+        from .code_mode import code_mode_runtime_available
+
+        if not code_mode_runtime_available():
+            logger.warning(
+                "CODE_MODE is enabled but the 'code-mode' extra is not "
+                "installed. Falling back to CODE_MODE=false behavior "
+                "(full tool catalog, tool-group builtins registered). "
+                "Install with: pip install 'amazon-ads-mcp[code-mode]' "
+                "(or set CODE_MODE=false to silence this warning)."
+            )
+            return False
+        return True
+
+    async def _setup_default_identity(self):
+        """Setup default identity if configured."""
+        if hasattr(self.auth_manager, "_default_identity_id"):
+            await self.auth_manager.set_active_identity(
+                self.auth_manager._default_identity_id
+            )
+
+    async def _create_main_server(self) -> FastMCP:
+        """Create the main FastMCP server instance.
+
+        :return: Main server instance
+        :rtype: FastMCP
+        """
+        # Create server with appropriate configuration
+        # Include lifespan if provided for clean startup/shutdown handling
+        server = FastMCP(
+            "Amazon Ads MCP Server",
+            version=__version__,
+            lifespan=self.lifespan,
+            tasks=settings.enable_tasks,
+        )
+
+        # Setup server-side sampling handler if enabled
+        if settings.enable_sampling:
+            try:
+                from .sampling_handler import create_sampling_handler
+
+                # Create the sampling handler
+                sampling_handler = create_sampling_handler()
+
+                if sampling_handler:
+                    # Use the sampling wrapper instead of private attribute
+                    from ..utils.sampling_wrapper import (
+                        configure_sampling_handler,
+                    )
+
+                    configure_sampling_handler(sampling_handler)
+                    logger.info("Server-side sampling handler configured via wrapper")
+                else:
+                    logger.info(
+                        "Server-side sampling not configured (missing config or disabled)"
+                    )
+
+            except Exception as e:
+                logger.error(f"Failed to setup sampling handler: {e}")
+        else:
+            logger.info("Sampling is disabled in settings")
+
+        return server
+
+    async def _setup_middleware(self):
+        """Setup server middleware."""
+        middleware_list = []
+
+        # v1 cross-server envelope translator MUST be the OUTERMOST middleware.
+        # Order matters in FastMCP: middleware appended first runs outermost
+        # for request-phase and tool-call hooks. The envelope middleware catches
+        # every exception raised below it and re-raises as a v1 envelope
+        # ``ToolError``. See openbridge-mcp/CONTRACT.md.
+        from ..middleware.error_envelope_middleware import (
+            create_error_envelope_middleware,
+        )
+
+        middleware_list.append(create_error_envelope_middleware())
+        logger.info(
+            "Added ErrorEnvelopeMiddleware (v1 contract) as the outermost middleware"
+        )
+
+        from .inbound_auth import create_inbound_http_auth_middleware
+
+        configured_host = os.getenv("HOST") or settings.mcp_server_host
+        middleware_list.append(
+            create_inbound_http_auth_middleware(self.auth_manager, configured_host)
+        )
+        logger.info("Added inbound HTTP auth middleware (Layer 1 caller gate)")
+
+        # Schema-driven pre-flight key normalization. Runs AFTER the envelope
+        # translator (so ambiguity / no-match events still emerge as v1
+        # envelopes if the call subsequently fails) and BEFORE any downstream
+        # guardrail or schema-validation middleware (so they see canonical
+        # keys, not legacy aliases).
+        from ..middleware.schema_normalization import (
+            SchemaKeyNormalizationMiddleware,
+        )
+
+        middleware_list.append(SchemaKeyNormalizationMiddleware())
+        logger.info("Added SchemaKeyNormalizationMiddleware")
+
+        # Phase 1 (Round 11): pre-flight JSON Schema validation. Runs
+        # AFTER SchemaKeyNormalizationMiddleware so it sees the
+        # post-rewrite arg dict, but BEFORE FastMCP dispatches the call.
+        # On constraint failure raises AdsValidationError with a canonical
+        # SCHEMA_* code so the error envelope translator surfaces
+        # structured ``mcp_input_validation`` envelopes instead of
+        # FastMCP's raw ``ValidationError`` strings. Closes SP-6 / SP-9 /
+        # SP-13 cross-server parity from the client conformance report.
+        from ..middleware.schema_validation import (
+            create_schema_validation_middleware,
+        )
+
+        middleware_list.append(create_schema_validation_middleware())
+        logger.info(
+            "Added SchemaValidationMiddleware (pre-flight JSON Schema enforcement)"
+        )
+
+        # Inject upstream rate-limit telemetry into successful dict responses.
+        # Reads the per-call context-var populated by the resilient HTTP client
+        # and merges ``_meta.rate_limit`` / ``_meta.retry_after_seconds`` into
+        # the response. Errors are still handled by the envelope middleware
+        # registered above; this layer only touches the success path.
+        from ..middleware.meta_injection_middleware import MetaInjectionMiddleware
+
+        middleware_list.append(MetaInjectionMiddleware())
+        logger.info("Added MetaInjectionMiddleware (success-path rate-limit telemetry)")
+
+        # Round 14 Phase B: per-identity QueryAdvertiserAccount cache.
+        # Sits AFTER ErrorEnvelope + MetaInjection so cache hits flow
+        # through error/meta wrapping if a stale entry triggers
+        # downstream issues, and BEFORE the resilient HTTP client so
+        # cache short-circuit precedes upstream dispatch.
+        from ..middleware.query_advertiser_cache import (
+            create_query_advertiser_cache_middleware,
+        )
+
+        middleware_list.append(create_query_advertiser_cache_middleware())
+        logger.info(
+            "Added QueryAdvertiserCacheMiddleware "
+            "(per-identity QAA result cache)"
+        )
+
+        # Error callback for logging
+        def error_callback(error: Exception, context=None) -> None:
+            logger.error(f"Tool execution error: {type(error).__name__}: {error}")
+
+        # FastMCP's ErrorHandlingMiddleware stays in place for non-tool error
+        # paths (resources, prompts) that the envelope middleware doesn't
+        # cover. Envelope translation for tool-call errors is owned by the
+        # ErrorEnvelopeMiddleware above.
+        # Production config: no tracebacks exposed, consistent error transformation
+        error_middleware = ErrorHandlingMiddleware(
+            include_traceback=False,  # Don't expose internal details
+            transform_errors=True,  # Provide consistent error responses
+            error_callback=error_callback,  # Log errors for debugging
+        )
+        middleware_list.append(error_middleware)
+        logger.info("Added ErrorHandlingMiddleware for consistent error handling")
+
+        # Add response caching middleware (security-aware whitelist)
+        if settings.enable_response_caching:
+            from ..middleware.caching import create_caching_middleware
+
+            caching_middleware = create_caching_middleware()
+            middleware_list.append(caching_middleware)
+            logger.info("Added ResponseCachingMiddleware with security-aware whitelist")
+
+        # Add sampling middleware if configured
+        from ..utils.sampling_wrapper import get_sampling_wrapper
+
+        wrapper = get_sampling_wrapper()
+        if wrapper.has_handler():
+            from ..middleware.sampling import create_sampling_middleware
+
+            sampling_middleware = create_sampling_middleware()
+            if sampling_middleware:
+                middleware_list.append(sampling_middleware)
+            logger.info("Added server-side sampling middleware")
+
+        # Bridge ContextVar auth state with FastMCP session state for all
+        # providers. Tool calls may cross async contexts within the same MCP
+        # session; without this, Direct+HTTP loses identity/credentials/profile
+        # ContextVars between calls. OpenBridge gets the same middleware via
+        # create_auth_middleware below, so skip adding it twice.
+        provider_type = getattr(self.auth_manager.provider, "provider_type", None)
+        if provider_type != "openbridge":
+            middleware_list.append(AuthSessionStateMiddleware())
+            logger.info(
+                "Added AuthSessionStateMiddleware for %s auth", provider_type or "unknown"
+            )
+
+        # Add OpenBridge middleware if using OpenBridge auth
+        if provider_type == "openbridge":
+            ob_config = create_openbridge_config()
+            auth_middlewares = create_auth_middleware(
+                ob_config, auth_manager=self.auth_manager
+            )
+            # create_auth_middleware returns a list, so extend instead of append
+            middleware_list.extend(auth_middlewares)
+            logger.info(
+                f"Added {len(auth_middlewares)} OpenBridge authentication middleware components"
+            )
+
+        # Add OAuth middleware if credentials are available
+        if create_oauth_middleware and all(
+            [
+                settings.oauth_client_id,
+                settings.oauth_client_secret,
+                settings.oauth_redirect_uri,
+            ]
+        ):
+            oauth_middleware = create_oauth_middleware()
+            middleware_list.append(oauth_middleware)
+            logger.info("Added OAuth middleware for web authentication")
+
+        # Apply middleware to server
+        for middleware in middleware_list:
+            self.server.middleware.append(middleware)
+
+    async def _setup_http_client(self) -> AuthenticatedClient:
+        """Setup the authenticated HTTP client.
+
+        :return: Configured HTTP client
+        :rtype: AuthenticatedClient
+        """
+        # Auth-aware base URL selection
+
+        # Determine base URL based on auth provider type
+        if self.auth_manager and hasattr(self.auth_manager.provider, "provider_type"):
+            provider_type = self.auth_manager.provider.provider_type
+
+            if provider_type == "openbridge":
+                # For OpenBridge: Default to NA at startup
+                # The real region will be determined from the identity at request time
+                region = "na"
+                logger.info(
+                    "OpenBridge: Using default NA base URL at startup (per-request routing will override based on identity)"
+                )
+            else:
+                # For Direct auth: use configured region from settings
+                region = settings.amazon_ads_region
+                logger.info(
+                    f"Direct auth: Using configured region '{region}' from settings"
+                )
+        else:
+            # Fallback to settings region if no auth manager
+            region = settings.amazon_ads_region
+            logger.warning(
+                f"No auth manager available, using region '{region}' from settings"
+            )
+
+        base_url = RegionConfig.get_api_endpoint(region)
+
+        import httpx
+
+        return AuthenticatedClient(
+            auth_manager=self.auth_manager,
+            media_registry=self.media_registry,
+            header_resolver=self.header_resolver,
+            base_url=base_url,
+            timeout=httpx.Timeout(
+                # Allow longer timeouts for Amazon Ads API
+                connect=10.0,  # Connection timeout
+                read=60.0,  # Read timeout for response
+                write=10.0,  # Write timeout for request
+                pool=10.0,  # Pool timeout
+            ),
+        )
+
+    async def _register_sidecar_middleware(self) -> None:
+        """Install the sidecar transform middleware.
+
+        Transform-rule sources (first match wins for base rules):
+          1. ``openapi/resources/``  — dev tree; may or may not be present
+          2. ``dist/openapi/resources/`` — production build output
+          3. ``src/amazon_ads_mcp/resources/`` — wheel fallback
+
+        The hand-authored overlay file under ``dist/openapi/overlays/``
+        is ALWAYS loaded on top (when present). Overlays carry alias
+        rules (arg_aliases) that must survive the private ``.build/``
+        regen of the base transform files. They live under ``dist/`` —
+        the canonical home for OpenAPI deployment artifacts — so the
+        regen pipeline never touches them.
+
+        Installation proceeds even when no base rules compiled — as long
+        as the overlay provides at least one transform. This is the
+        common path in production (base transforms are auto-generated
+        output_transform stubs; aliases live exclusively in overlays).
+        """
+        from ..utils.resource_paths import (
+            resolve_overlays_dir,
+            resolve_resources_dir,
+        )
+        from .sidecar_middleware import (
+            SidecarTransformMiddleware,
+            set_active_middleware,
+        )
+
+        # Prefer the exact tree _mount_resource_servers mounted from so
+        # transforms are compiled against the specs the tools came from.
+        resources_dir = (
+            getattr(self, "resources_dir", None) or resolve_resources_dir()
+        )
+        if resources_dir is None:
+            logger.info(
+                "SidecarTransformMiddleware: no resources dir; skipping"
+            )
+            return
+
+        overlays_dir = resolve_overlays_dir()
+
+        middleware = SidecarTransformMiddleware(
+            resources_dir, overlays_dir=overlays_dir
+        )
+        stats = middleware.stats()
+        if stats["compiled_transforms"] == 0:
+            logger.info(
+                "SidecarTransformMiddleware: no input transforms compiled "
+                "(resources=%s overlays=%s); skipping",
+                resources_dir,
+                overlays_dir,
+            )
+            return
+
+        self.server.add_middleware(middleware)
+        # Expose the same compiled transforms to the Code Mode sandbox
+        # bridge — its call_tool pathway skips the server middleware
+        # chain. See sidecar_middleware for details.
+        set_active_middleware(middleware)
+        logger.info(
+            "SidecarTransformMiddleware: installed (resources=%s, overlays=%s, "
+            "%d tools covered)",
+            resources_dir,
+            overlays_dir,
+            stats["tools_with_transforms"],
+        )
+
+    async def _mount_resource_servers(self):
+        """Mount resource servers for API isolation."""
+        from ..utils.resource_paths import resolve_resources_dir
+
+        resources_dir = resolve_resources_dir()
+        if resources_dir is None:
+            logger.warning("No resources directory found")
+            return
+        logger.info(f"Using resources from {resources_dir}")
+        # Remember the tree we mounted from so the sidecar middleware
+        # compiles transforms against the SAME specs (a divergent pick
+        # pairs minified dist specs with source-tree rules, or vice versa).
+        self.resources_dir = resources_dir
+
+        # Load namespace mapping and package allowlist (if any)
+        namespace_mapping = await self._load_namespace_mapping(resources_dir)
+        package_allowlist = await self._load_package_allowlist(resources_dir)
+
+        # Defer media registry cache invalidation until all specs are mounted
+        self.media_registry.begin_bulk_load()
+
+        # Process each resource file
+        skip_files = {"packages.json", "manifest.json"}
+        for spec_path in sorted(resources_dir.glob("*.json")):
+            # Skip metadata files and sidecars
+            if spec_path.name in skip_files:
+                logger.debug(f"Skipping metadata file: {spec_path.name}")
+                continue
+
+            # Skip sidecar files (check suffix, not substring)
+            if spec_path.stem.endswith((".media", ".manifest", ".transform")):
+                logger.debug(f"Skipping sidecar file: {spec_path.name}")
+                continue
+
+            # Skip if not in package allowlist (when set)
+            ns = spec_path.stem
+            if package_allowlist:
+                if ns not in package_allowlist:
+                    logger.debug(
+                        "Skipping %s - not in AMAZON_AD_API_PACKAGES allowlist",
+                        ns,
+                    )
+                    continue
+
+            await self._mount_single_resource(spec_path, namespace_mapping)
+
+        # All specs mounted — flush the deferred cache invalidation
+        self.media_registry.end_bulk_load()
+
+    async def _load_namespace_mapping(self, resources_dir: Path) -> Dict[str, str]:
+        """Load namespace to prefix mapping from packages.json.
+
+        :return: Namespace to prefix mapping
+        :rtype: Dict[str, str]
+        """
+        from ..utils.resource_paths import find_packages_json
+
+        packages_path = find_packages_json(resources_dir)
+        if not packages_path:
+            return {}
+
+        try:
+            data = json_load(packages_path)
+            mapping: Dict[str, str] = {}
+
+            # Preferred: explicit prefixes map
+            prefixes = data.get("prefixes") if isinstance(data, dict) else None
+            if isinstance(prefixes, dict):
+                for ns, pref in prefixes.items():
+                    if isinstance(ns, str) and isinstance(pref, str):
+                        mapping[ns] = pref
+
+            # Back-compat: some generators might emit a flat map with {ns: {prefix: "..."}}
+            if not mapping:
+                for ns, info in data.items() if isinstance(data, dict) else []:
+                    if (
+                        isinstance(info, dict)
+                        and "prefix" in info
+                        and isinstance(info["prefix"], str)
+                    ):
+                        mapping[ns] = info["prefix"]
+
+            return mapping
+        except Exception as e:
+            logger.error(f"Failed to load packages.json: {e}")
+            return {}
+
+    async def _load_package_allowlist(
+        self, resources_dir: Path
+    ) -> Dict[str, None] | set:
+        """Load allowed packages from environment and resolve to resource namespaces.
+
+        Supports aliases defined in packages.json. Returns a set of allowed
+        resource namespaces (matching the .json stem names). Empty set means
+        no restriction.
+        """
+        # Load packages.json to resolve aliases -> namespaces and read defaults
+        from ..utils.resource_paths import find_packages_json
+
+        packages_path = find_packages_json(resources_dir)
+
+        alias_map: Dict[str, str] = {}
+        default_tokens: list[str] = []
+        if packages_path:
+            try:
+                data = json_load(packages_path)
+                # `aliases` is a map: alias_slug -> NamespaceName
+                aliases = data.get("aliases") if isinstance(data, dict) else None
+                if isinstance(aliases, dict):
+                    for alias, ns in aliases.items():
+                        if isinstance(alias, str) and isinstance(ns, str):
+                            alias_map[alias.lower()] = ns
+                # Optional defaults list (aliases or namespace stems)
+                defaults_val = data.get("defaults") if isinstance(data, dict) else None
+                if isinstance(defaults_val, list):
+                    default_tokens = [str(v).strip().lower() for v in defaults_val if str(v).strip()]
+            except Exception as e:
+                logger.debug("Failed to read aliases/defaults from %s: %s", packages_path, e)
+
+        # Determine requested tokens from env or defaults
+        raw = os.getenv("AMAZON_AD_API_PACKAGES") or os.getenv("AD_API_PACKAGES")
+        requested: set[str]
+        if raw:
+            raw = raw.strip()
+            # Strip surrounding quotes if present (Windows compatibility)
+            if (raw.startswith('"') and raw.endswith('"')) or (raw.startswith("'") and raw.endswith("'")):
+                logger.debug("Stripping quotes from AMAZON_AD_API_PACKAGES value")
+                raw = raw[1:-1]
+            requested = {part.strip().lower() for part in raw.split(",") if part.strip()}
+            logger.debug("Parsed AMAZON_AD_API_PACKAGES: %s", requested)
+        else:
+            # Use packages.json defaults when available; otherwise fall back to a safe minimal set
+            fallback_defaults = [
+                "profiles",
+                "accounts-ads-accounts",
+                "reporting-version-3",
+            ]
+            requested = set(default_tokens or fallback_defaults)
+            logger.info("Using default package allowlist: %s", ", ".join(sorted(requested)))
+
+        if not requested:
+            # If we somehow ended up empty, do not restrict
+            return set()
+
+        # Build allowlist: map requested tokens using alias_map when possible.
+        allow: set[str] = set()
+        for token in requested:
+            # Exact alias -> namespace
+            if token in alias_map:
+                allow.add(alias_map[token])
+                continue
+            # Accept tokens that are already namespace (file stem) names
+            # Attempt case-insensitive match against available specs
+            for spec_path in resources_dir.glob("*.json"):
+                stem = spec_path.stem
+                if stem.endswith((".media", ".manifest", ".transform")):
+                    continue
+                if spec_path.name in {"packages.json", "manifest.json"}:
+                    continue
+                if stem.lower() == token:
+                    allow.add(stem)
+
+        if allow:
+            logger.info(
+                "Package allowlist active (%d): %s",
+                len(allow),
+                ", ".join(sorted(allow)),
+            )
+        else:
+            logger.warning(
+                "No packages resolved from requested tokens; loading nothing.")
+        return allow
+
+    async def _mount_single_resource(
+        self, spec_path: Path, namespace_mapping: Dict[str, str]
+    ):
+        """Mount a single resource server.
+
+        :param spec_path: Path to the OpenAPI spec
+        :type spec_path: Path
+        :param namespace_mapping: Namespace to prefix mapping
+        :type namespace_mapping: Dict[str, str]
+        """
+        try:
+            # Load the spec
+            spec = json_load(spec_path)
+
+            # Validate it's an OpenAPI spec
+            if not isinstance(spec, dict) or "openapi" not in spec:
+                logger.warning(f"Skipping {spec_path.name} - not an OpenAPI spec")
+                return
+
+            # Determine namespace and prefix first (before using it)
+            namespace = spec_path.stem
+
+            # Populate registries from spec (media types and headers)
+            self.media_registry.add_from_spec(spec)
+            self.header_resolver.add_from_spec(spec)
+
+            # Load and apply media type sidecar if it exists
+            media_path = spec_path.with_suffix(".media.json")
+            if media_path.exists():
+                try:
+                    media_spec = json_load(media_path)
+                    self.media_registry.add_from_spec(media_spec)
+                    logger.debug(f"Loaded media types from {media_path.name}")
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to load media sidecar {media_path.name}: {e}"
+                    )
+
+            # Slim the spec
+            slim_openapi_for_tools(spec)
+
+            # Auth-aware server URL configuration
+            if self.auth_manager and hasattr(
+                self.auth_manager.provider, "provider_type"
+            ):
+                provider_type = self.auth_manager.provider.provider_type
+
+                if provider_type == "openbridge":
+                    # For OpenBridge: Don't hardcode a regional server
+                    # Runtime routing will override based on identity
+                    spec["servers"] = [
+                        {
+                            "url": RegionConfig.get_api_endpoint("na"),
+                            "description": "Runtime routing will override based on identity",
+                        }
+                    ]
+                    logger.debug(
+                        f"OpenBridge: Spec {namespace} servers will be overridden at runtime"
+                    )
+                else:
+                    # For Direct auth: use configured region
+                    region = settings.amazon_ads_region
+                    # Use centralized region config
+                    base_url = RegionConfig.get_api_endpoint(region)
+                    spec["servers"] = [{"url": base_url}]
+                    logger.debug(f"Direct auth: Spec {namespace} using {region} server")
+            else:
+                # Fallback to settings region
+                region = settings.amazon_ads_region
+                # Use centralized region config
+                base_url = RegionConfig.get_api_endpoint(region)
+                spec["servers"] = [{"url": base_url}]
+
+            # Get prefix from mapping
+            prefix = namespace_mapping.get(namespace, namespace)
+
+            # Create sub-server from OpenAPI spec
+            # HTTP client already has 60s read timeout configured
+            sub_server = FastMCP.from_openapi(
+                openapi_spec=spec,
+                client=self.client,
+                name=prefix,
+            )
+
+            # Mount the sub-server with namespace (v3: prefix → namespace)
+            self.server.mount(server=sub_server, namespace=prefix)
+            self.mounted_servers.setdefault(prefix, []).append(sub_server)
+
+            # Track tool count for progressive disclosure totals
+            tools = await sub_server.list_tools()
+            self.group_tool_counts[prefix] = (
+                self.group_tool_counts.get(prefix, 0) + len(tools)
+            )
+
+            # Apply sidecars (transforms) to the mounted sub-server
+            from .sidecar_loader import apply_sidecars
+
+            await apply_sidecars(sub_server, spec_path)
+
+            logger.info(f"Mounted {namespace} with prefix '{prefix}'")
+
+        except Exception as e:
+            logger.error(f"Failed to mount {spec_path}: {e}")
+
+    def _progressive_disclosure_enabled(self) -> bool:
+        """Check if progressive tool disclosure is enabled via env flag.
+
+        Defaults to **off** because Claude Desktop (and most MCP clients)
+        do not re-fetch ``tools/list`` mid-conversation after receiving a
+        ``tools/list_changed`` notification.  Enable for clients that do.
+        """
+        val = os.getenv("PROGRESSIVE_TOOL_DISCLOSURE", "false").lower()
+        return val in ("1", "true", "yes")
+
+    async def _disable_mounted_tools(self):
+        """Disable all mounted OpenAPI tools for progressive disclosure.
+
+        When progressive disclosure is active, OpenAPI-derived tools start
+        hidden.  Users call ``enable_tool_group(prefix)`` to reveal them.
+        This keeps the initial ``tools/list`` response minimal.
+        """
+        if not self._progressive_disclosure_enabled():
+            logger.info("Progressive tool disclosure disabled; all tools visible")
+            return
+
+        total_disabled = 0
+        for prefix, sub_servers in self.mounted_servers.items():
+            group_count = self.group_tool_counts.get(prefix, 0)
+            for sub_server in sub_servers:
+                sub_server.disable(components={"tool"})
+            total_disabled += group_count
+            logger.debug(
+                "Disabled %d tools in group '%s'", group_count, prefix
+            )
+
+        logger.info(
+            "Progressive disclosure: disabled %d tools across %d groups",
+            total_disabled,
+            len(self.mounted_servers),
+        )
+
+    async def _setup_builtin_tools(self, skip_tool_groups: bool = False):
+        """Setup built-in tools for the server.
+
+        :param skip_tool_groups: If True, skip registering tool group tools
+            (list_tool_groups / enable_tool_group). Used when code mode is active
+            since GetTags replaces progressive disclosure browsing.
+        """
+        from ..server.builtin_tools import register_all_builtin_tools
+
+        await register_all_builtin_tools(
+            self.server,
+            mounted_servers=self.mounted_servers,
+            group_tool_counts=self.group_tool_counts,
+            skip_tool_groups=skip_tool_groups,
+        )
+
+    async def _tag_tools_for_code_mode(self):
+        """Tag all tools with human-readable categories for code mode discovery.
+
+        OpenAPI tools are tagged by namespace prefix (e.g. ``cm`` -> ``campaign-management``).
+        Builtin tools are tagged as ``server-management``.
+        Must run before ``_apply_code_mode()`` so CodeMode's GetTags sees the tags.
+        """
+        from .code_mode import tag_builtin_tools, tag_tools_by_prefix
+
+        api_count = await tag_tools_by_prefix(self.server, self.mounted_servers)
+        builtin_count = await tag_builtin_tools(self.server)
+        logger.info(
+            "Code mode tagging complete: %d API tools + %d builtin tools",
+            api_count,
+            builtin_count,
+        )
+
+    async def _apply_code_mode(self):
+        """Apply CodeMode transform to replace tools with meta-tools.
+
+        Code Mode replaces all upstream tools with meta-tools (discovery + execute)
+        that let the LLM discover and invoke tools on-demand via sandboxed Python.
+
+        Token reduction: 98.4% for 55+ tools (34,971 -> 547 tokens).
+
+        The primary missing-extra guard is ``_resolve_code_mode()`` in
+        ``build()``, which downgrades to genuine ``CODE_MODE=false`` behavior
+        before any code-mode-conditional setup runs. The fail-soft here is a
+        second belt for the rare partial-install case where the availability
+        probe passed but transform creation still raises: the server stays
+        up with the full catalog exposed, though without the tool-group
+        builtins the false path would have registered.
+        """
+        from .code_mode import create_code_mode_transform
+
+        try:
+            transform = create_code_mode_transform()
+        except ImportError as exc:
+            logger.warning(
+                "CODE_MODE runtime probe passed but transform creation "
+                "failed (%s). Falling back to the full tool catalog. "
+                "Reinstall with: pip install 'amazon-ads-mcp[code-mode]' "
+                "(or set CODE_MODE=false).",
+                exc,
+            )
+            return
+
+        self.server.add_transform(transform)
+
+        # Enumerating tools here would materialize the entire mounted
+        # catalog just to print the handful of static meta-tool names, so
+        # the full listing is DEBUG-only.
+        logger.info(
+            "Code mode active: meta-tools replace the tool catalog; "
+            "original tools accessible via execute."
+        )
+        if logger.isEnabledFor(logging.DEBUG):
+            tools = await self.server.list_tools()
+            logger.debug(
+                "Code mode meta-tools: %s",
+                ", ".join(t.name for t in tools),
+            )
+
+    async def _strip_output_schemas(self):
+        """Strip outputSchema from all registered tools.
+
+        MCP clients receive tool definitions including ``outputSchema`` on
+        every ``tools/list`` call.  These response-shape schemas are rarely
+        useful to Claude (it sees the actual return value) but can add
+        thousands of tokens to the context window.
+
+        This method nulls out ``output_schema`` on every tool registered
+        on the main server, saving ~3K tokens for typical builtin tool
+        sets.  OpenAPI-derived tools already have response schemas
+        stripped by Phase 2 (``_strip_response_bodies``).
+        """
+        tools = await self.server.list_tools()
+        stripped = 0
+        for tool_info in tools:
+            try:
+                tool = await self.server.get_tool(tool_info.name)
+                if tool and getattr(tool, "output_schema", None) is not None:
+                    tool.output_schema = None
+                    stripped += 1
+            except Exception:
+                # Skip tools that can't be accessed (e.g. mounted)
+                pass
+
+        if stripped:
+            logger.info(
+                "Stripped outputSchema from %d tools to reduce context usage",
+                stripped,
+            )
+
+    async def _setup_builtin_prompts(self):
+        """Setup built-in prompts for the server."""
+        from ..server.builtin_prompts import register_all_builtin_prompts
+
+        await register_all_builtin_prompts(self.server)
+
+    async def _setup_oauth_callback(self):
+        """Setup OAuth callback route for HTTP transport."""
+        # Only register OAuth callback route for HTTP transport
+        # Check if server has custom_route method (HTTP transport)
+        if hasattr(self.server, "custom_route"):
+            import httpx
+            from starlette.requests import Request
+            from starlette.responses import HTMLResponse
+
+            @self.server.custom_route("/auth/callback", methods=["GET"])
+            async def oauth_callback(request: Request):
+                """Handle OAuth callback from Amazon with secure state validation."""
+                import os
+
+                from ..auth.oauth_state_store import get_oauth_state_store
+
+                code = request.query_params.get("code")
+                state = request.query_params.get("state")
+                scope = request.query_params.get("scope")
+                error = request.query_params.get("error")
+                error_description = request.query_params.get("error_description")
+
+                # Handle OAuth errors from Amazon
+                if error:
+                    logger.error(f"OAuth error: {error} - {error_description}")
+                    # Don't expose internal error details in HTML
+                    from .html_templates import get_error_html
+
+                    html = get_error_html(
+                        title="Authorization Failed",
+                        message="The authorization request could not be completed.",
+                    )
+                    return HTMLResponse(html, status_code=400)
+
+                # Validate required parameters
+                if not code or not state:
+                    logger.error("Missing code or state in OAuth callback")
+                    from .html_templates import get_missing_params_html
+
+                    html = get_missing_params_html()
+                    return HTMLResponse(html, status_code=400)
+
+                # Extract user agent and IP for validation
+                user_agent = request.headers.get("user-agent")
+                ip_address = request.client.host if request.client else None
+
+                logger.info(
+                    f"OAuth callback received: code=[REDACTED], state=[REDACTED], scope={scope}"
+                )
+
+                try:
+                    # Validate state with secure store
+                    state_store = get_oauth_state_store()
+                    is_valid, error_message = state_store.validate_state(
+                        state=state,
+                        user_agent=user_agent,
+                        ip_address=ip_address,
+                    )
+                    state_entry = state_store.get_state_entry(state) if is_valid else None
+
+                    if not is_valid:
+                        logger.warning(f"Invalid OAuth state: {error_message}")
+                        from .html_templates import get_validation_error_html
+
+                        html = get_validation_error_html()
+                        return HTMLResponse(html, status_code=403)
+
+                    # State is valid, proceed with token exchange
+                    token_url = RegionConfig.get_oauth_endpoint(
+                        settings.amazon_ads_region
+                    )
+
+                    # Use explicit timeout for OAuth token exchange
+                    timeout = httpx.Timeout(
+                        connect=10.0, read=30.0, write=10.0, pool=10.0
+                    )
+                    async with httpx.AsyncClient(timeout=timeout) as client:
+                        response = await client.post(
+                            token_url,
+                            data={
+                                "grant_type": "authorization_code",
+                                "code": code,
+                                # Use PORT env var or request port or default
+                                "redirect_uri": f"http://localhost:{os.getenv('PORT') or request.url.port or 9080}/auth/callback",
+                                "client_id": settings.ad_api_client_id,
+                                "client_secret": settings.ad_api_client_secret,
+                            },
+                        )
+
+                    if response.status_code == 200:
+                        tokens = response.json()
+
+                        # Store tokens securely
+                        try:
+                            from datetime import datetime, timedelta, timezone
+
+                            from ..auth.secure_token_store import (
+                                get_secure_token_store,
+                            )
+
+                            secure_store = get_secure_token_store()
+                            token_metadata = {
+                                "scope": tokens.get("scope"),
+                                "oauth_caller_id": getattr(
+                                    state_entry, "caller_id", None
+                                ),
+                                "oauth_session_id": getattr(
+                                    state_entry, "session_id", None
+                                ),
+                            }
+
+                            if "refresh_token" in tokens:
+                                secure_store.store_token(
+                                    token_id="oauth_refresh_token",
+                                    token_value=tokens["refresh_token"],
+                                    token_type="refresh",
+                                    expires_at=datetime.now(timezone.utc)
+                                    + timedelta(days=365),
+                                    metadata=token_metadata,
+                                )
+
+                            if "access_token" in tokens:
+                                secure_store.store_token(
+                                    token_id="oauth_access_token",
+                                    token_value=tokens["access_token"],
+                                    token_type="access",
+                                    expires_at=datetime.now(timezone.utc)
+                                    + timedelta(seconds=tokens.get("expires_in", 3600)),
+                                    metadata={
+                                        "token_type": tokens.get("token_type", "Bearer")
+                                    },
+                                )
+
+                            logger.info("Stored tokens in secure token store")
+                        except Exception as e:
+                            logger.error(f"Failed to store tokens securely: {e}")
+                            # Don't expose internal error details
+                            from .html_templates import (
+                                get_token_storage_error_html,
+                            )
+
+                            html = get_token_storage_error_html()
+                            return HTMLResponse(html, status_code=500)
+
+                        # Store in auth manager if available
+                        if self.auth_manager:
+                            from datetime import datetime, timedelta, timezone
+
+                            from ..auth.token_store import TokenKind
+
+                            # Store refresh token
+                            if "refresh_token" in tokens:
+                                await self.auth_manager.set_token(
+                                    provider_type="direct",
+                                    identity_id="direct-auth",
+                                    token_kind=TokenKind.REFRESH,
+                                    token=tokens["refresh_token"],
+                                    expires_at=datetime.now(timezone.utc)
+                                    + timedelta(days=365),
+                                    metadata={
+                                        "oauth_caller_id": getattr(
+                                            state_entry, "caller_id", None
+                                        ),
+                                        "oauth_session_id": getattr(
+                                            state_entry, "session_id", None
+                                        ),
+                                    },
+                                )
+
+                            # Store access token
+                            expires_at = datetime.now(timezone.utc) + timedelta(
+                                seconds=tokens.get("expires_in", 3600)
+                            )
+                            await self.auth_manager.set_token(
+                                provider_type="direct",
+                                identity_id="direct-auth",
+                                token_kind=TokenKind.ACCESS,
+                                token=tokens["access_token"],
+                                expires_at=expires_at,
+                                metadata={"token_type": "Bearer"},
+                            )
+
+                            logger.info("Stored OAuth tokens in auth manager")
+
+                        # Success response
+                        from .html_templates import get_success_html
+
+                        html = get_success_html()
+                        return HTMLResponse(html)
+                    else:
+                        # Error response
+                        from ..utils.security import sanitize_string
+
+                        error_msg = sanitize_string(response.text)
+                        logger.error(
+                            f"Token exchange failed: {response.status_code} - {error_msg}"
+                        )
+
+                        from .html_templates import (
+                            get_token_exchange_error_html,
+                        )
+
+                        html = get_token_exchange_error_html()
+                        return HTMLResponse(html, status_code=400)
+
+                except Exception as e:
+                    logger.error(f"OAuth callback error: {e}")
+                    # Don't expose internal exception details
+                    from .html_templates import get_server_error_html
+
+                    html = get_server_error_html()
+                    return HTMLResponse(html, status_code=500)
+
+            logger.info("Registered OAuth callback route at /auth/callback")
+
+    async def _setup_file_routes(self):
+        """Setup HTTP file download routes.
+
+        Registers custom routes for downloading files via HTTP.
+        Only effective with HTTP transport (not stdio).
+        """
+        from .file_routes import register_file_routes
+
+        register_file_routes(self.server)
+
+    async def _setup_health_check(self):
+        """Register health endpoints for container orchestration.
+
+        Returns 200 with basic server info on /health, /healthz, and /.
+        Used by load balancers, Cloudflare Containers, Kubernetes probes
+        (k8s/GCE convention is /healthz), and bare root probes.
+        """
+        if not hasattr(self.server, "custom_route"):
+            return
+
+        from starlette.requests import Request
+        from starlette.responses import JSONResponse
+
+        from .. import __version__ as package_version
+
+        git_sha = os.getenv("AMAZON_ADS_MCP_GIT_SHA", "unknown")
+        built_at = os.getenv("AMAZON_ADS_MCP_BUILD_TIME", "unknown")
+
+        def _health_payload() -> dict:
+            return {
+                "status": "healthy",
+                "service": "amazon-ads-mcp",
+                "version": package_version,
+                "git_sha": git_sha,
+                "built_at": built_at,
+            }
+
+        @self.server.custom_route("/health", methods=["GET"])
+        async def health_check(request: Request) -> JSONResponse:
+            return JSONResponse(_health_payload())
+
+        @self.server.custom_route("/healthz", methods=["GET"])
+        async def health_check_z(request: Request) -> JSONResponse:
+            return JSONResponse(_health_payload())
+
+        @self.server.custom_route("/", methods=["GET"])
+        async def root_health(request: Request) -> JSONResponse:
+            return JSONResponse(_health_payload())

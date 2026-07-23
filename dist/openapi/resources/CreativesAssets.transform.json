@@ -1,0 +1,153 @@
+{
+  "version": "1.0",
+  "generated": "auto",
+  "namespace": "CreativesAssets",
+  "tools": [
+    {
+      "match": {
+        "operationId": "getAsset"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "AssetId",
+            "to": "assetId"
+          },
+          {
+            "from": "Version",
+            "to": "version"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "assetsBatchRegister"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      }
+    },
+    {
+      "match": {
+        "operationId": "getAssetsBatchRegister"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "RequestId",
+            "to": "requestId"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "registerAsset"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "AsinList",
+            "to": "asinList"
+          },
+          {
+            "from": "AssetSubTypeList",
+            "to": "assetSubTypeList"
+          },
+          {
+            "from": "AssetType",
+            "to": "assetType"
+          },
+          {
+            "from": "AssociatedSubEntityList",
+            "to": "associatedSubEntityList"
+          },
+          {
+            "from": "Name",
+            "to": "name"
+          },
+          {
+            "from": "RegistrationContext",
+            "to": "registrationContext"
+          },
+          {
+            "from": "SkipAssetSubTypesDetection",
+            "to": "skipAssetSubTypesDetection"
+          },
+          {
+            "from": "Tags",
+            "to": "tags"
+          },
+          {
+            "from": "Url",
+            "to": "url"
+          },
+          {
+            "from": "VersionInfo",
+            "to": "versionInfo"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "searchAssets"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "FilterCriteria",
+            "to": "filterCriteria"
+          },
+          {
+            "from": "PageCriteria",
+            "to": "pageCriteria"
+          },
+          {
+            "from": "SortCriteria",
+            "to": "sortCriteria"
+          },
+          {
+            "from": "Text",
+            "to": "text"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "getUploadLocation"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "FileName",
+            "to": "fileName"
+          }
+        ]
+      }
+    }
+  ]
+}

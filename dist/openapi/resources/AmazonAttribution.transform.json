@@ -1,0 +1,112 @@
+{
+  "version": "1.0",
+  "generated": "auto",
+  "namespace": "AmazonAttribution",
+  "tools": [
+    {
+      "match": {
+        "operationId": "getAdvertisersByProfile"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      }
+    },
+    {
+      "match": {
+        "operationId": "getPublishers"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      }
+    },
+    {
+      "match": {
+        "operationId": "getAttributionTagsByCampaign"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "AdvertiserIds",
+            "to": "advertiserIds"
+          },
+          {
+            "from": "Count",
+            "to": "count"
+          },
+          {
+            "from": "CursorId",
+            "to": "cursorId"
+          },
+          {
+            "from": "EndDate",
+            "to": "endDate"
+          },
+          {
+            "from": "GroupBy",
+            "to": "groupBy"
+          },
+          {
+            "from": "Metrics",
+            "to": "metrics"
+          },
+          {
+            "from": "ReportType",
+            "to": "reportType"
+          },
+          {
+            "from": "StartDate",
+            "to": "startDate"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "getPublisherAttributionTagTemplate"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "PublisherIds",
+            "to": "publisherIds"
+          },
+          {
+            "from": "AdvertiserIds",
+            "to": "advertiserIds"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "getPublisherMacroAttributionTag"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "PublisherIds",
+            "to": "publisherIds"
+          },
+          {
+            "from": "AdvertiserIds",
+            "to": "advertiserIds"
+          }
+        ]
+      }
+    }
+  ]
+}

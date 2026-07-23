@@ -1,0 +1,329 @@
+{
+  "version": "1.0",
+  "generated": "auto",
+  "namespace": "AdsAPIv1SponsoredTelevision",
+  "tools": [
+    {
+      "match": {
+        "operationId": "STCreateAdGroup"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "AdGroups",
+            "to": "adGroups"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "STCreateAd"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "Ads",
+            "to": "ads"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "STCreateCampaign"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "Campaigns",
+            "to": "campaigns"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "STCreateTarget"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "Targets",
+            "to": "targets"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "STDeleteAd"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "AdIds",
+            "to": "adIds"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "STDeleteTarget"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "TargetIds",
+            "to": "targetIds"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "STQueryAdGroup"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "AdGroupIdFilter",
+            "to": "adGroupIdFilter"
+          },
+          {
+            "from": "AdProductFilter",
+            "to": "adProductFilter"
+          },
+          {
+            "from": "CampaignIdFilter",
+            "to": "campaignIdFilter"
+          },
+          {
+            "from": "MaxResults",
+            "to": "maxResults"
+          },
+          {
+            "from": "NameFilter",
+            "to": "nameFilter"
+          },
+          {
+            "from": "NextToken",
+            "to": "nextToken"
+          },
+          {
+            "from": "StateFilter",
+            "to": "stateFilter"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "STQueryAd"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "AdGroupIdFilter",
+            "to": "adGroupIdFilter"
+          },
+          {
+            "from": "AdIdFilter",
+            "to": "adIdFilter"
+          },
+          {
+            "from": "AdProductFilter",
+            "to": "adProductFilter"
+          },
+          {
+            "from": "CampaignIdFilter",
+            "to": "campaignIdFilter"
+          },
+          {
+            "from": "MaxResults",
+            "to": "maxResults"
+          },
+          {
+            "from": "NextToken",
+            "to": "nextToken"
+          },
+          {
+            "from": "StateFilter",
+            "to": "stateFilter"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "STQueryCampaign"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "AdProductFilter",
+            "to": "adProductFilter"
+          },
+          {
+            "from": "MaxResults",
+            "to": "maxResults"
+          },
+          {
+            "from": "NextToken",
+            "to": "nextToken"
+          },
+          {
+            "from": "StateFilter",
+            "to": "stateFilter"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "STQueryTarget"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "AdGroupIdFilter",
+            "to": "adGroupIdFilter"
+          },
+          {
+            "from": "AdProductFilter",
+            "to": "adProductFilter"
+          },
+          {
+            "from": "CampaignIdFilter",
+            "to": "campaignIdFilter"
+          },
+          {
+            "from": "MaxResults",
+            "to": "maxResults"
+          },
+          {
+            "from": "NextToken",
+            "to": "nextToken"
+          },
+          {
+            "from": "StateFilter",
+            "to": "stateFilter"
+          },
+          {
+            "from": "TargetIdFilter",
+            "to": "targetIdFilter"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "STUpdateAdGroup"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "AdGroups",
+            "to": "adGroups"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "STUpdateAd"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "Ads",
+            "to": "ads"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "STUpdateCampaign"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "Campaigns",
+            "to": "campaigns"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "STUpdateTarget"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "Targets",
+            "to": "targets"
+          }
+        ]
+      }
+    }
+  ]
+}

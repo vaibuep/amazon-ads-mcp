@@ -1,0 +1,24 @@
+{
+  "version": "1.0",
+  "generated": "auto",
+  "namespace": "Forecasts",
+  "tools": [
+    {
+      "match": {
+        "operationId": "DSPRetrieveCampaignForecast"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "CampaignForecastDescriptions",
+            "to": "campaignForecastDescriptions"
+          }
+        ]
+      }
+    }
+  ]
+}

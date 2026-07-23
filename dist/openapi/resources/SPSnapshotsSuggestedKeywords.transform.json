@@ -1,0 +1,202 @@
+{
+  "version": "1.0",
+  "generated": "auto",
+  "namespace": "SPSnapshotsSuggestedKeywords",
+  "tools": [
+    {
+      "match": {
+        "operationId": "getAdGroupBidRecommendations"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "AdGroupId",
+            "to": "adGroupId"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "getAdGroupSuggestedKeywords"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      }
+    },
+    {
+      "match": {
+        "operationId": "getAdGroupSuggestedKeywordsEx"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "SuggestBids",
+            "to": "suggestBids"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "bulkGetAsinSuggestedKeywords"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "Asins",
+            "to": "asins"
+          },
+          {
+            "from": "MaxNumSuggestions",
+            "to": "maxNumSuggestions"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "getAsinSuggestedKeywords"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "AsinValue",
+            "to": "asinValue"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "createKeywordBidRecommendations"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "AdGroupId",
+            "to": "adGroupId"
+          },
+          {
+            "from": "Keywords",
+            "to": "keywords"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "getKeywordBidRecommendations"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "KeywordId",
+            "to": "keywordId"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "getSnapshotStatus"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "SnapshotId",
+            "to": "snapshotId"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "downloadSnapshot"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "SnapshotId",
+            "to": "snapshotId"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "getBidRecommendations"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "AdGroupId",
+            "to": "adGroupId"
+          },
+          {
+            "from": "Expressions",
+            "to": "expressions"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "requestSnapshot"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "RecordType",
+            "to": "recordType"
+          },
+          {
+            "from": "StateFilter",
+            "to": "stateFilter"
+          }
+        ]
+      }
+    }
+  ]
+}

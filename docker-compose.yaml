@@ -1,0 +1,72 @@
+services:
+  amazon-ads-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # Populated by the caller to stamp build provenance into the image.
+        # Example: GIT_SHA=$(git rev-parse --short HEAD) \
+        #          BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+        #          docker compose build amazon-ads-mcp
+        GIT_SHA: ${GIT_SHA:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+        APP_UID: "10001"
+        APP_GID: "10001"
+    image: amazon-ads-mcp:latest
+    container_name: amazon-ads-mcp
+    env_file:
+      - .env
+    environment:
+      # Server runtime
+      - TRANSPORT=http
+      - HOST=0.0.0.0
+      - PORT=${PORT:-8000}
+      - LOG_LEVEL=INFO
+      # Full tool catalog by default; a curated AMAZON_AD_API_PACKAGES in
+      # .env (or the shell) takes precedence via ${VAR:-default}
+      # interpolation, so slim setups keep their package selection.
+      - >-
+        AMAZON_AD_API_PACKAGES=${AMAZON_AD_API_PACKAGES:-profiles,test-account,forecasts,conversions,campaign-conversion-tracking,brand-stores-management,campaign-manage,accounts-manager-accounts,accounts-ads-accounts,accounts-portfolios,accounts-billing,accounts-account-budgets,audiences-discovery,reporting-version-3,brand-benchmarks,brand-metrics,stores-analytics,sponsored-products,sp-suggested-keywords,sponsored-brands-v4,sponsored-brands-v3,sponsored-display,dsp-measurement,dsp-advertisers,dsp-audiences,dsp-conversions,dsp-target-kpi-recommendations,amazon-attribution,audience-insights,partner-opportunities,tactical-recommendations,persona-builder,creative-assets,change-history,data-provider-data,products-metadata,products-eligibility,unified-pre-moderation-results,moderation-results,amazon-marketing-stream,locations,exports-snapshots,marketing-mix-modeling,reach-forecasting,amc-administration,amc-workflow,amc-rule-audience,amc-ad-audience,ads-api-v1-sp,ads-api-v1-sb,ads-api-v1-dsp,ads-api-v1-sd,ads-api-v1-st,ads-api-v1-all,ads-api-v1-beta}
+      # Token persistence (disabled by default for security)
+      # Set to 'true' to cache refresh tokens across restarts (see docs for security implications)
+      - AMAZON_ADS_TOKEN_PERSIST=false
+      - AMAZON_ADS_CACHE_DIR=/app/.cache/amazon-ads-mcp
+      - AMAZON_ADS_DOWNLOAD_DIR=/app/data/uploads/amazon-ads-mcp
+      # Authentication method - configure AUTH_METHOD in .env
+      - AMAZON_ADS_AUTH_METHOD=${AUTH_METHOD:-openbridge}
+      # OpenBridge auth defaults are now built-in:
+      # REFRESH_TOKEN_ENABLED=true, AUTH_ENABLED=true, JWT_VALIDATION_ENABLED=false
+      # Override only if you need non-default behavior
+      # Background tasks (enabled by default - allows long-running tools to run in background)
+      # ENABLE_TASKS=false
+      # Runtime OpenAPI slimming (on by default - set to 'false' to disable)
+      # SLIM_OPENAPI_STRIP_RESPONSES=false  # Keep response schemas in tool definitions
+      # SLIM_OPENAPI_AGGRESSIVE=false       # Disable enum truncation, schema flattening, etc.
+      # Progressive tool disclosure: hide API tools by default, reveal on demand
+      # Off by default - Claude Desktop doesn't re-fetch tools/list mid-conversation
+      # Enable for MCP clients that support tools/list_changed notifications
+      # PROGRESSIVE_TOOL_DISCLOSURE=true
+
+    ports:
+      - "${PORT:-8000}:${PORT:-8000}"
+    volumes:
+      # Shared durable storage with Agent Factory, Code Factory, and Amazon SP MCP.
+      # Amazon Ads writes service-owned artifacts under /app/data/uploads/amazon-ads-mcp.
+      - shared-execution-data:/app/data
+      # Persist token cache across container restarts
+      - cache:/app/.cache
+    command: [
+      "python", "-m", "amazon_ads_mcp.server",
+      "--transport", "${TRANSPORT:-http}",
+      "--host", "${HOST:-0.0.0.0}",
+      "--port", "${PORT:-8000}"
+    ]
+ 
+volumes:
+  # `name:` pins the unprefixed global volume name so Agent Factory, Code
+  # Factory, and Amazon SP MCP stacks share it, while Compose still creates
+  # it on first `docker compose up` (external: true broke fresh-machine
+  # quick starts with "external volume ... not found").
+  shared-execution-data:
+    name: shared-execution-data
+  cache: {}

@@ -1,0 +1,678 @@
+{
+  "version": "1.0",
+  "generated": "auto",
+  "namespace": "AmazonDSPMeasurement",
+  "tools": [
+    {
+      "match": {
+        "operationId": "CheckDSPAudienceResearchEligibility"
+      },
+      "pagination": {
+        "param_name": "nextToken",
+        "response_key": "nextToken",
+        "all_pages": false,
+        "limit_param": "maxResults",
+        "default_limit": 100
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "NextToken",
+            "to": "nextToken"
+          },
+          {
+            "from": "MaxResults",
+            "to": "maxResults"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "CheckDSPBrandLiftEligibility"
+      },
+      "pagination": {
+        "param_name": "nextToken",
+        "response_key": "nextToken",
+        "all_pages": false,
+        "limit_param": "maxResults",
+        "default_limit": 100
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "NextToken",
+            "to": "nextToken"
+          },
+          {
+            "from": "MaxResults",
+            "to": "maxResults"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "CheckDSPCreativeTestingEligibility"
+      },
+      "pagination": {
+        "param_name": "nextToken",
+        "response_key": "nextToken",
+        "all_pages": false,
+        "limit_param": "maxResults",
+        "default_limit": 100
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "NextToken",
+            "to": "nextToken"
+          },
+          {
+            "from": "MaxResults",
+            "to": "maxResults"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "CheckDSPOmnichannelMetricsEligibility"
+      },
+      "pagination": {
+        "param_name": "nextToken",
+        "response_key": "nextToken",
+        "all_pages": false,
+        "limit_param": "maxResults",
+        "default_limit": 100
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "NextToken",
+            "to": "nextToken"
+          },
+          {
+            "from": "MaxResults",
+            "to": "maxResults"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "GetDSPAudienceResearchStudies"
+      },
+      "pagination": {
+        "param_name": "nextToken",
+        "response_key": "nextToken",
+        "all_pages": false,
+        "limit_param": "maxResults",
+        "default_limit": 100
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "StudyIds",
+            "to": "studyIds"
+          },
+          {
+            "from": "AdvertiserId",
+            "to": "advertiserId"
+          },
+          {
+            "from": "NextToken",
+            "to": "nextToken"
+          },
+          {
+            "from": "MaxResults",
+            "to": "maxResults"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "CreateDSPAudienceResearchStudy"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      }
+    },
+    {
+      "match": {
+        "operationId": "UpdateDSPAudienceResearchStudy"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "StudyId",
+            "to": "studyId"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "GetDSPAudienceResearchStudyResult"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "StudyId",
+            "to": "studyId"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "GetDSPBrandLiftStudies"
+      },
+      "pagination": {
+        "param_name": "nextToken",
+        "response_key": "nextToken",
+        "all_pages": false,
+        "limit_param": "maxResults",
+        "default_limit": 100
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "StudyIdFilters",
+            "to": "studyIdFilters"
+          },
+          {
+            "from": "AdvertiserId",
+            "to": "advertiserId"
+          },
+          {
+            "from": "NextToken",
+            "to": "nextToken"
+          },
+          {
+            "from": "MaxResults",
+            "to": "maxResults"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "CreateDSPBrandLiftStudies"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      }
+    },
+    {
+      "match": {
+        "operationId": "UpdateDSPBrandLiftStudies"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      }
+    },
+    {
+      "match": {
+        "operationId": "GetDSPCreativeTestingStudies"
+      },
+      "pagination": {
+        "param_name": "nextToken",
+        "response_key": "nextToken",
+        "all_pages": false,
+        "limit_param": "maxResults",
+        "default_limit": 100
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "StudyIds",
+            "to": "studyIds"
+          },
+          {
+            "from": "AdvertiserId",
+            "to": "advertiserId"
+          },
+          {
+            "from": "NextToken",
+            "to": "nextToken"
+          },
+          {
+            "from": "MaxResults",
+            "to": "maxResults"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "CreateDSPCreativeTestingStudy"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      }
+    },
+    {
+      "match": {
+        "operationId": "UpdateDSPCreativeTestingStudy"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "StudyId",
+            "to": "studyId"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "GetDSPCreativeTestingStudyResult"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "StudyId",
+            "to": "studyId"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "GetDSPOmnichannelMetricsStudies"
+      },
+      "pagination": {
+        "param_name": "nextToken",
+        "response_key": "nextToken",
+        "all_pages": false,
+        "limit_param": "maxResults",
+        "default_limit": 100
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "StudyIds",
+            "to": "studyIds"
+          },
+          {
+            "from": "AdvertiserId",
+            "to": "advertiserId"
+          },
+          {
+            "from": "NextToken",
+            "to": "nextToken"
+          },
+          {
+            "from": "MaxResults",
+            "to": "maxResults"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "CreateDSPOmnichannelMetricsStudies"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      }
+    },
+    {
+      "match": {
+        "operationId": "UpdateDSPOmnichannelMetricsStudies"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      }
+    },
+    {
+      "match": {
+        "operationId": "GetDSPOmnichannelMetricsStudyResult"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "StudyId",
+            "to": "studyId"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "CheckPlanningEligibility"
+      },
+      "pagination": {
+        "param_name": "nextToken",
+        "response_key": "nextToken",
+        "all_pages": false,
+        "limit_param": "maxResults",
+        "default_limit": 100
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "NextToken",
+            "to": "nextToken"
+          },
+          {
+            "from": "MaxResults",
+            "to": "maxResults"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "CancelMeasurementStudies"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "StudyIds",
+            "to": "studyIds"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "GetStudies"
+      },
+      "pagination": {
+        "param_name": "nextToken",
+        "response_key": "nextToken",
+        "all_pages": false,
+        "limit_param": "maxResults",
+        "default_limit": 100
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "StudyIds",
+            "to": "studyIds"
+          },
+          {
+            "from": "AdvertiserId",
+            "to": "advertiserId"
+          },
+          {
+            "from": "NextToken",
+            "to": "nextToken"
+          },
+          {
+            "from": "MaxResults",
+            "to": "maxResults"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "GetDSPBrandLiftStudyResult"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "StudyId",
+            "to": "studyId"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "GetSurveys"
+      },
+      "pagination": {
+        "param_name": "nextToken",
+        "response_key": "nextToken",
+        "all_pages": false,
+        "limit_param": "maxResults",
+        "default_limit": 100
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "SurveyIds",
+            "to": "surveyIds"
+          },
+          {
+            "from": "StudyId",
+            "to": "studyId"
+          },
+          {
+            "from": "NextToken",
+            "to": "nextToken"
+          },
+          {
+            "from": "MaxResults",
+            "to": "maxResults"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "CreateSurveys"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      }
+    },
+    {
+      "match": {
+        "operationId": "UpdateSurveys"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      }
+    },
+    {
+      "match": {
+        "operationId": "vendorProduct"
+      },
+      "pagination": {
+        "param_name": "nextToken",
+        "response_key": "nextToken",
+        "all_pages": false,
+        "limit_param": "maxResults",
+        "default_limit": 100
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "NextToken",
+            "to": "nextToken"
+          },
+          {
+            "from": "MaxResults",
+            "to": "maxResults"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "omnichannelMetricsBrandSearch"
+      },
+      "pagination": {
+        "param_name": "nextToken",
+        "response_key": "nextToken",
+        "all_pages": false,
+        "limit_param": "maxResults",
+        "default_limit": 100
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "NextToken",
+            "to": "nextToken"
+          },
+          {
+            "from": "MaxResults",
+            "to": "maxResults"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "vendorProductPolicy"
+      },
+      "pagination": {
+        "param_name": "nextToken",
+        "response_key": "nextToken",
+        "all_pages": false,
+        "limit_param": "maxResults",
+        "default_limit": 100
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "VendorProductIds",
+            "to": "vendorProductIds"
+          },
+          {
+            "from": "NextToken",
+            "to": "nextToken"
+          },
+          {
+            "from": "MaxResults",
+            "to": "maxResults"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "vendorProductSurveyQuestionTemplates"
+      },
+      "pagination": {
+        "param_name": "nextToken",
+        "response_key": "nextToken",
+        "all_pages": false,
+        "limit_param": "maxResults",
+        "default_limit": 100
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "VendorProductIds",
+            "to": "vendorProductIds"
+          },
+          {
+            "from": "SurveyQuestionTemplateIds",
+            "to": "surveyQuestionTemplateIds"
+          },
+          {
+            "from": "NextToken",
+            "to": "nextToken"
+          },
+          {
+            "from": "MaxResults",
+            "to": "maxResults"
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,143 @@
+{
+  "version": "1.0",
+  "generated": "auto",
+  "namespace": "RecommendationsInsightsPartnerOpportunities",
+  "tools": [
+    {
+      "match": {
+        "operationId": "partnerOpportunitiesListOpportunities"
+      },
+      "pagination": {
+        "param_name": "nextToken",
+        "response_key": "nextToken",
+        "all_pages": false,
+        "limit_param": "maxResults",
+        "default_limit": 100
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "MaxResults",
+            "to": "maxResults"
+          },
+          {
+            "from": "NextToken",
+            "to": "nextToken"
+          },
+          {
+            "from": "Locale",
+            "to": "locale"
+          },
+          {
+            "from": "RetrieveTranslationKeys",
+            "to": "retrieveTranslationKeys"
+          },
+          {
+            "from": "AdvertiserId",
+            "to": "advertiserId"
+          },
+          {
+            "from": "ProfileId",
+            "to": "profileId"
+          },
+          {
+            "from": "Audience",
+            "to": "audience"
+          },
+          {
+            "from": "ObjectiveType",
+            "to": "objectiveType"
+          },
+          {
+            "from": "Product",
+            "to": "product"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "partnerOpportunitiesSummarizeOpportunities"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "Audience",
+            "to": "audience"
+          },
+          {
+            "from": "ObjectiveType",
+            "to": "objectiveType"
+          },
+          {
+            "from": "Product",
+            "to": "product"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "partnerOpportunitiesApplicationStatus"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "PartnerOpportunityId",
+            "to": "partnerOpportunityId"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "partnerOpportunitiesApply"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "PartnerOpportunityId",
+            "to": "partnerOpportunityId"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "partnerOpportunitiesGetOpportunityFile"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "PartnerOpportunityId",
+            "to": "partnerOpportunityId"
+          },
+          {
+            "from": "FileFormat",
+            "to": "fileFormat"
+          }
+        ]
+      }
+    }
+  ]
+}

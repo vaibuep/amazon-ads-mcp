@@ -1,0 +1,440 @@
+{
+  "version": "1.0",
+  "generated": "auto",
+  "namespace": "AMCWorkflow",
+  "tools": [
+    {
+      "match": {
+        "operationId": "listDataSources"
+      },
+      "pagination": {
+        "param_name": "nextToken",
+        "response_key": "nextToken",
+        "all_pages": false,
+        "limit_param": "maxResults",
+        "default_limit": 100
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "NextToken",
+            "to": "nextToken"
+          },
+          {
+            "from": "Limit",
+            "to": "limit"
+          },
+          {
+            "from": "InstanceId",
+            "to": "instanceId"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "getDataSource"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "InstanceId",
+            "to": "instanceId"
+          },
+          {
+            "from": "DataSourceId",
+            "to": "dataSourceId"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "listSchedules"
+      },
+      "pagination": {
+        "param_name": "nextToken",
+        "response_key": "nextToken",
+        "all_pages": false,
+        "limit_param": "maxResults",
+        "default_limit": 100
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "NextToken",
+            "to": "nextToken"
+          },
+          {
+            "from": "Limit",
+            "to": "limit"
+          },
+          {
+            "from": "MarketplaceId",
+            "to": "marketplaceId"
+          },
+          {
+            "from": "InstanceId",
+            "to": "instanceId"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "createSchedule"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "InstanceId",
+            "to": "instanceId"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "deleteSchedule"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "InstanceId",
+            "to": "instanceId"
+          },
+          {
+            "from": "ScheduleId",
+            "to": "scheduleId"
+          },
+          {
+            "from": "MarketplaceId",
+            "to": "marketplaceId"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "getSchedule"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "MarketplaceId",
+            "to": "marketplaceId"
+          },
+          {
+            "from": "InstanceId",
+            "to": "instanceId"
+          },
+          {
+            "from": "ScheduleId",
+            "to": "scheduleId"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "updateSchedule"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "InstanceId",
+            "to": "instanceId"
+          },
+          {
+            "from": "ScheduleId",
+            "to": "scheduleId"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "listWorkflowExecutions"
+      },
+      "pagination": {
+        "param_name": "nextToken",
+        "response_key": "nextToken",
+        "all_pages": false,
+        "limit_param": "maxResults",
+        "default_limit": 100
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "NextToken",
+            "to": "nextToken"
+          },
+          {
+            "from": "Limit",
+            "to": "limit"
+          },
+          {
+            "from": "SortAscending",
+            "to": "sortAscending"
+          },
+          {
+            "from": "IncludeCancelled",
+            "to": "includeCancelled"
+          },
+          {
+            "from": "MinCreationTime",
+            "to": "minCreationTime"
+          },
+          {
+            "from": "MaxCreationTime",
+            "to": "maxCreationTime"
+          },
+          {
+            "from": "TimeZone",
+            "to": "timeZone"
+          },
+          {
+            "from": "WorkflowId",
+            "to": "workflowId"
+          },
+          {
+            "from": "IncludeWorkflow",
+            "to": "includeWorkflow"
+          },
+          {
+            "from": "InstanceId",
+            "to": "instanceId"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "createWorkflowExecution"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "InstanceId",
+            "to": "instanceId"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "getWorkflowExecution"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "InstanceId",
+            "to": "instanceId"
+          },
+          {
+            "from": "WorkflowExecutionId",
+            "to": "workflowExecutionId"
+          },
+          {
+            "from": "IncludeWorkflow",
+            "to": "includeWorkflow"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "UpdateWorkflowExecution"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "InstanceId",
+            "to": "instanceId"
+          },
+          {
+            "from": "WorkflowExecutionId",
+            "to": "workflowExecutionId"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "getWorkflowExecutionDownloadUrls"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "InstanceId",
+            "to": "instanceId"
+          },
+          {
+            "from": "WorkflowExecutionId",
+            "to": "workflowExecutionId"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "listWorkflows"
+      },
+      "pagination": {
+        "param_name": "nextToken",
+        "response_key": "nextToken",
+        "all_pages": false,
+        "limit_param": "maxResults",
+        "default_limit": 100
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "NextToken",
+            "to": "nextToken"
+          },
+          {
+            "from": "Limit",
+            "to": "limit"
+          },
+          {
+            "from": "InstanceId",
+            "to": "instanceId"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "createWorkflow"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "InstanceId",
+            "to": "instanceId"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "deleteWorkflow"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "InstanceId",
+            "to": "instanceId"
+          },
+          {
+            "from": "WorkflowId",
+            "to": "workflowId"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "getWorkflow"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "InstanceId",
+            "to": "instanceId"
+          },
+          {
+            "from": "WorkflowId",
+            "to": "workflowId"
+          }
+        ]
+      }
+    },
+    {
+      "match": {
+        "operationId": "updateWorkflow"
+      },
+      "output_transform": {
+        "sample_n": 10,
+        "artifact_threshold_bytes": 10240
+      },
+      "input_transform": {
+        "arg_aliases": [
+          {
+            "from": "InstanceId",
+            "to": "instanceId"
+          },
+          {
+            "from": "WorkflowId",
+            "to": "workflowId"
+          }
+        ]
+      }
+    }
+  ]
+}

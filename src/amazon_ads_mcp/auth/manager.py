@@ -1,0 +1,1072 @@
+"""Central authentication management for Amazon Ads MCP.
+
+This module provides centralized authentication management using the
+pluggable provider architecture. It handles identity management,
+credential caching, and provider coordination for seamless API access.
+
+The module supports:
+- Multiple authentication providers (direct, OpenBridge, etc.)
+- Identity-based credential management
+- Automatic token refresh and caching
+- Profile scope management
+- Region-specific endpoint handling
+"""
+
+import asyncio
+import logging
+import os
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional
+
+from ..config.settings import settings
+from ..exceptions import AuthenticationError
+from ..models import AuthCredentials, Identity
+from .session_state import (
+    get_active_credentials as _ctx_get_credentials,
+    get_active_identity as _ctx_get_identity,
+    get_active_profiles as _ctx_get_profiles,
+    get_last_seen_token_fingerprint,
+    get_request_tenant_fingerprint,
+    get_refresh_token_override,
+    reset_session_state,
+    set_active_credentials as _ctx_set_credentials,
+    set_active_identity as _ctx_set_identity,
+    set_active_profiles as _ctx_set_profiles,
+    token_fingerprint,
+)
+
+# Import providers to trigger registration
+from .base import BaseAmazonAdsProvider, BaseIdentityProvider, ProviderConfig
+from .registry import ProviderRegistry
+from .token_store import (
+    TokenEntry,
+    TokenKey,
+    TokenKind,
+    TokenStore,
+    create_token_store,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class AuthManager:
+    """Central manager for authentication and identity management.
+
+    This manager uses the provider registry to dynamically load
+    authentication providers based on configuration. It implements
+    a singleton pattern to ensure consistent state across the
+    application.
+
+    The manager handles:
+    - Provider initialization and configuration
+    - Identity management and switching
+    - Credential caching and refresh
+    - Profile scope management
+    - Region-specific endpoint handling
+    """
+
+    _instance: Optional["AuthManager"] = None
+    _CREDENTIAL_REFRESH_SKEW_SECONDS = 300
+
+    def __new__(cls):
+        """Create or return singleton instance.
+
+        Implements singleton pattern to ensure single auth manager
+        instance across the application.
+
+        :return: Singleton instance of AuthManager
+        :rtype: AuthManager
+        """
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __init__(self):
+        """Initialize the authentication manager.
+
+        Sets up the manager with settings, provider configuration,
+        and initial state. Only initializes once due to singleton
+        pattern.
+
+        :return: None
+        :rtype: None
+        """
+        if hasattr(self, "_initialized"):
+            return
+
+        self._initialized = True
+        self.settings = settings
+        self.provider: Optional[BaseAmazonAdsProvider] = None
+
+        # Initialize unified token store - persistence disabled by default for security
+        # Users can enable with AMAZON_ADS_TOKEN_PERSIST=true if needed
+        self._token_store: TokenStore = create_token_store(
+            persist=settings.token_persist
+        )
+
+        # NOTE: Per-request mutable state (_active_identity, _active_credentials,
+        # _active_profiles) has been moved to ContextVars in session_state.py
+        # to prevent cross-client auth leakage in multi-tenant scenarios.
+        # Profile ID resolved via Settings (supports legacy env var aliases)
+        self._default_profile_id: Optional[str] = settings.effective_profile_id
+
+        # In-memory cache of full AuthCredentials for identity-specific
+        # providers (e.g. Openbridge) keyed by identity_id.  Avoids
+        # re-fetching from the remote service on every tool call when
+        # the token is still valid.
+        self._credentials_cache: Dict[str, "AuthCredentials"] = {}
+
+        # Per-identity asyncio locks used to coalesce concurrent
+        # credential refreshes (single-flight).  ``_refresh_locks_lock``
+        # guards lazy creation of the per-identity locks so two tasks
+        # racing into the first request for the same identity cannot
+        # create two different Lock objects.
+        self._identity_refresh_locks: Dict[str, asyncio.Lock] = {}
+        self._refresh_locks_lock: Optional[asyncio.Lock] = None
+
+        # Initialize provider based on settings
+        self._setup_provider()
+
+    async def _get_refresh_lock(self, identity_id: str) -> asyncio.Lock:
+        """Return the asyncio.Lock that serializes refreshes for *identity_id*.
+
+        The outer ``_refresh_locks_lock`` is created lazily because
+        :class:`asyncio.Lock` must be constructed inside a running loop
+        on some Python versions.
+        """
+        if self._refresh_locks_lock is None:
+            self._refresh_locks_lock = asyncio.Lock()
+        async with self._refresh_locks_lock:
+            lock = self._identity_refresh_locks.get(identity_id)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._identity_refresh_locks[identity_id] = lock
+            return lock
+
+    def _setup_provider(self):
+        """Setup authentication provider using the registry.
+
+        This method determines which provider to use based on configuration
+        and creates it using the provider registry.
+
+        :return: None
+        :rtype: None
+        :raises ValueError: If no provider can be initialized
+        """
+        # Determine auth method
+        auth_method = self._determine_auth_method()
+
+        # Build provider config based on method
+        config = self._build_provider_config(auth_method)
+
+        # Create provider from registry
+        try:
+            self.provider = ProviderRegistry.create_provider(auth_method, config)
+            logger.info(f"Initialized {auth_method} authentication provider")
+
+            # Set explicit defaults only when configuration names one.
+            if (
+                auth_method in {"openbridge", "kuudo"}
+                and (
+                    self.settings.openbridge_remote_identity_id
+                    if auth_method == "openbridge"
+                    else self.settings.kuudo_remote_identity_id
+                )
+            ):
+                self._default_identity_id = (
+                    self.settings.openbridge_remote_identity_id
+                    if auth_method == "openbridge"
+                    else self.settings.kuudo_remote_identity_id
+                )
+
+        except ValueError as e:
+            # Provide helpful error message
+            available = list(ProviderRegistry.list_providers().keys())
+            raise ValueError(
+                f"Failed to initialize auth provider '{auth_method}': {e}\n"
+                f"Available providers: {', '.join(available)}\n"
+                f"Make sure you have the required configuration for your chosen provider."
+            )
+
+    def _determine_auth_method(self) -> str:
+        """Determine which authentication method to use based on available config.
+
+        Auto-detects the authentication method from environment variables
+        or uses the explicitly configured method.
+
+        :return: Authentication method name (e.g., 'direct', 'openbridge')
+        :rtype: str
+        :raises ValueError: If no authentication method is configured
+        """
+        # Explicit env var is an override: trust the method, defer credential
+        # checks to the provider.  This cannot move to Settings because
+        # Settings.auth_method defaults to "openbridge" — we need to
+        # distinguish "user explicitly set" from "default value".
+        explicit_env_method = os.getenv("AUTH_METHOD") or os.getenv(
+            "AMAZON_ADS_AUTH_METHOD"
+        )
+        if explicit_env_method:
+            return explicit_env_method.strip().lower()
+
+        method_from_settings = (self.settings.auth_method or "").strip().lower()
+        # Treat non-default methods as explicit configuration
+        if method_from_settings and method_from_settings != "openbridge":
+            return method_from_settings
+
+        # Allow explicit openbridge only when credentials are present
+        if (
+            method_from_settings == "openbridge"
+            and self.settings.openbridge_refresh_token
+        ):
+            return "openbridge"
+
+        # Auto-detect based on available credentials
+        if all(
+            [
+                self.settings.effective_client_id,
+                self.settings.effective_client_secret,
+                self.settings.effective_refresh_token,
+            ]
+        ):
+            logger.info("Auto-detected direct authentication from environment")
+            return "direct"
+
+        if self.settings.openbridge_refresh_token:
+            logger.info("Auto-detected OpenBridge authentication from environment")
+            return "openbridge"
+
+        if self.settings.kuudo_api_base_url and self.settings.kuudo_api_key:
+            logger.info("Auto-detected Kuudo authentication from environment")
+            return "kuudo"
+
+        # Check for other provider configs here as needed
+        # For example, check for AUTH0_DOMAIN, OKTA_DOMAIN, etc.
+
+        raise ValueError(
+            "No authentication method configured. Please set one of:\n"
+            "- For direct auth: AD_API_CLIENT_ID, AD_API_CLIENT_SECRET, AD_API_REFRESH_TOKEN\n"
+            "- For OpenBridge: OPENBRIDGE_REFRESH_TOKEN (or OPENBRIDGE_API_KEY)\n"
+            "- For Kuudo: KUUDO_API_BASE_URL and KUUDO_API_KEY\n"
+            "- Or explicitly set AUTH_METHOD environment variable"
+        )
+
+    def _build_provider_config(self, auth_method: str) -> ProviderConfig:
+        """Build configuration for the specified authentication provider.
+
+        Creates a ProviderConfig instance with the appropriate
+        configuration data based on the authentication method.
+
+        :param auth_method: Authentication method to configure
+        :type auth_method: str
+        :return: Provider configuration object
+        :rtype: ProviderConfig
+        """
+        config_data = {}
+
+        if auth_method == "direct":
+            config_data = {
+                "client_id": self.settings.effective_client_id,
+                "client_secret": self.settings.effective_client_secret,
+                "refresh_token": self.settings.effective_refresh_token,
+                "profile_id": self.settings.effective_profile_id,
+                "region": self.settings.amazon_ads_region,
+            }
+
+        elif auth_method == "openbridge":
+            config_data = {
+                "refresh_token": self.settings.openbridge_refresh_token,
+                "region": self.settings.amazon_ads_region,
+                "auth_base_url": self.settings.openbridge_auth_base_url,
+                "identity_base_url": self.settings.openbridge_identity_base_url,
+                "service_base_url": self.settings.openbridge_service_base_url,
+            }
+
+        elif auth_method == "kuudo":
+            config_data = {
+                "base_url": self.settings.kuudo_api_base_url,
+                "api_key": self.settings.kuudo_api_key,
+                "provider": self.settings.kuudo_provider,
+                "region": self.settings.amazon_ads_region,
+            }
+
+        # Add more provider configs here as needed
+        # elif auth_method == "auth0":
+        #     config_data = {
+        #         "domain": os.getenv("AUTH0_DOMAIN"),
+        #         "client_id": os.getenv("AUTH0_CLIENT_ID"),
+        #         ...
+        #     }
+
+        return ProviderConfig(**config_data)
+
+    async def initialize_provider(self) -> None:
+        """Initialize the authentication provider.
+
+        Performs any asynchronous initialization required by the
+        configured provider.
+
+        :return: None
+        :rtype: None
+        """
+        if self.provider:
+            await self.provider.initialize()
+
+    # Identity management methods (for providers that support multiple identities)
+
+    async def list_identities(self, **kwargs) -> List[Identity]:
+        """List all available identities.
+
+        Retrieves a list of all available identities from the
+        configured provider. For providers that don't support
+        multiple identities, returns a synthetic default identity.
+
+        :param **kwargs: Provider-specific filter parameters
+        :type **kwargs: Any
+        :return: List of available identities
+        :rtype: List[Identity]
+        :raises RuntimeError: If no auth provider is configured
+        """
+        if not self.provider:
+            raise RuntimeError("No auth provider configured")
+
+        if not isinstance(self.provider, BaseIdentityProvider):
+            # Provider doesn't support multiple identities
+            # Return a synthetic single identity
+            return [
+                Identity(
+                    id="default",
+                    type=self.provider.provider_type,
+                    attributes={
+                        "name": f"Default {self.provider.provider_type} identity"
+                    },
+                )
+            ]
+
+        return await self.provider.list_identities(**kwargs)
+
+    async def get_identity(self, identity_id: str) -> Optional[Identity]:
+        """Get a specific identity by ID.
+
+        Retrieves a specific identity from the configured provider.
+        For providers that don't support multiple identities,
+        returns the default identity if the ID matches.
+
+        :param identity_id: Unique identifier for the identity
+        :type identity_id: str
+        :return: Identity if found, None otherwise
+        :rtype: Optional[Identity]
+        :raises RuntimeError: If no auth provider is configured
+        """
+        if not self.provider:
+            raise RuntimeError("No auth provider configured")
+
+        if not isinstance(self.provider, BaseIdentityProvider):
+            # Return synthetic identity if it matches
+            if identity_id == "default":
+                identities = await self.list_identities()
+                return identities[0] if identities else None
+            return None
+
+        return await self.provider.get_identity(identity_id)
+
+    async def set_active_identity(self, identity_id: str) -> Identity:
+        """Set the active identity for API operations.
+
+        Sets the specified identity as the active identity for
+        subsequent API operations. Clears cached credentials
+        for the previous identity.
+
+        :param identity_id: ID of the identity to activate
+        :type identity_id: str
+        :return: The activated identity
+        :rtype: Identity
+        :raises ValueError: If the specified identity is not found
+        """
+        logger.info(f"Setting active identity: {identity_id}")
+
+        identity = await self.get_identity(identity_id)
+        if not identity:
+            raise ValueError(f"Identity {identity_id} not found")
+
+        # Clear cached credentials if switching to a different identity
+        prev_creds = _ctx_get_credentials()
+        if prev_creds and prev_creds.identity_id != identity_id:
+            logger.info("Clearing cached credentials for previous identity")
+            _ctx_set_credentials(None)
+
+        _ctx_set_identity(identity)
+
+        logger.info(f"Active identity set to: {identity_id}")
+        return identity
+
+    async def ensure_default_identity(self) -> None:
+        """Ensure the default identity is loaded if configured.
+
+        Attempts to set the default identity if no active identity
+        is currently set and a default is configured.
+
+        :return: None
+        :rtype: None
+        """
+        if not _ctx_get_identity() and hasattr(self, "_default_identity_id"):
+            try:
+                await self.set_active_identity(self._default_identity_id)
+            except Exception as e:
+                logger.debug(f"Could not set default identity: {e}")
+            return
+
+        if _ctx_get_identity():
+            return
+
+        if self.provider and self.provider.provider_type == "direct":
+            identities = await self.list_identities()
+            if len(identities) == 1:
+                await self.set_active_identity(identities[0].id)
+            elif not identities:
+                logger.debug("No direct identity selected because no identities exist")
+            else:
+                logger.debug(
+                    "No direct identity selected because %d identities are available",
+                    len(identities),
+                )
+
+    async def _raise_no_active_identity(self) -> None:
+        """Raise a typed error when direct auth has no unambiguous identity."""
+        provider_type = self.provider.provider_type if self.provider else "unknown"
+        if provider_type == "direct":
+            identities = await self.list_identities()
+            if not identities:
+                exc = AuthenticationError(
+                    "No direct Amazon Ads identity credentials are configured. "
+                    "Register credentials or complete OAuth before calling "
+                    "operational tools.",
+                    details={"identity_count": 0},
+                )
+                exc.code = "CREDENTIALS_PENDING"
+                raise exc
+
+            exc = AuthenticationError(
+                "Multiple direct Amazon Ads identities are available. "
+                "Call set_active_identity before calling operational tools.",
+                details={
+                    "identity_count": len(identities),
+                    "identity_ids": [identity.id for identity in identities],
+                },
+            )
+            exc.code = "IDENTITY_SELECTION_REQUIRED"
+            raise exc
+
+        logger.error(
+            f"No active identity set for {provider_type}. "
+            f"Need to call set_active_identity() or configure default identity"
+        )
+        raise RuntimeError("No active identity set. Use set_active_identity() first.")
+
+    def get_active_identity(self) -> Optional[Identity]:
+        """Get the current active identity.
+
+        Returns the currently active identity for API operations.
+
+        :return: Active identity or None if none set
+        :rtype: Optional[Identity]
+        """
+        return _ctx_get_identity()
+
+    async def get_active_credentials(self) -> AuthCredentials:
+        """Get credentials for the active identity.
+
+        Retrieves valid credentials for the currently active identity,
+        refreshing them if necessary. For single-identity providers,
+        creates synthetic credentials.
+
+        :return: Valid credentials for the active identity
+        :rtype: AuthCredentials
+        :raises RuntimeError: If no auth provider is configured or no active identity
+        """
+        if not self.provider:
+            raise RuntimeError("No auth provider configured")
+
+        # For providers that support multiple identities
+        if isinstance(self.provider, BaseIdentityProvider):
+            active_identity = _ctx_get_identity()
+
+            # --- Hard stop: reject stale identity from a different tenant ---
+            # Even if the middleware cleared state on token change, this guard
+            # catches races, middleware ordering issues, and future regressions.
+            #
+            # Three cases trigger invalidation:
+            #   1. A provider-derived request fingerprint differs from last_seen
+            #      or has no prior session binding.
+            #   2. Token present but fingerprint differs from last_seen
+            #      → mid-session tenant swap.
+            #   3. No token on this request but last_seen fingerprint exists
+            #      → identity was established under a specific token we can
+            #        no longer verify; clear to prevent silent reuse.
+            if active_identity:
+                request_fp = get_request_tenant_fingerprint()
+                current_token = get_refresh_token_override()
+                last_fp = get_last_seen_token_fingerprint()
+
+                should_clear = False
+                if request_fp is not None:
+                    if last_fp != request_fp:
+                        should_clear = True
+                        logger.warning(
+                            "Request tenant fingerprint mismatches session state — "
+                            "clearing stale tenant state (identity=%s)",
+                            active_identity.id,
+                        )
+                elif current_token:
+                    current_fp = token_fingerprint(current_token)
+                    if last_fp and current_fp != last_fp:
+                        should_clear = True
+                        logger.warning(
+                            "Token fingerprint mismatch in get_active_credentials — "
+                            "clearing stale tenant state (identity=%s)",
+                            active_identity.id,
+                        )
+                elif last_fp:
+                    # Previous request had a token but this one doesn't.
+                    # If provider has a stable fallback token (e.g. env-configured),
+                    # compare it to last_seen fingerprint before clearing.
+                    effective_token = None
+                    if hasattr(self.provider, "_get_effective_refresh_token"):
+                        try:
+                            effective_token = self.provider._get_effective_refresh_token()
+                        except Exception:
+                            effective_token = None
+
+                    if effective_token:
+                        effective_fp = token_fingerprint(effective_token)
+                        if effective_fp != last_fp:
+                            should_clear = True
+                            logger.warning(
+                                "No per-request token and provider fallback token "
+                                "fingerprint mismatches session state — clearing stale "
+                                "tenant state (identity=%s)",
+                                active_identity.id,
+                            )
+                    else:
+                        session_creds = _ctx_get_credentials()
+                        if (
+                            session_creds
+                            and session_creds.identity_id == active_identity.id
+                            and datetime.now(timezone.utc) < session_creds.expires_at
+                        ):
+                            logger.debug(
+                                "No token on request, using valid session credentials "
+                                "for identity %s",
+                                active_identity.id,
+                            )
+                        else:
+                            should_clear = True
+                            logger.warning(
+                                "No token on request but session has token-scoped "
+                                "identity and no valid session credentials — clearing "
+                                "stale tenant state (identity=%s)",
+                                active_identity.id,
+                            )
+
+                if should_clear:
+                    _ctx_set_identity(None)
+                    _ctx_set_credentials(None)
+                    _ctx_set_profiles(None)
+                    active_identity = None
+
+                if active_identity:
+                    session_creds = _ctx_get_credentials()
+                    if (
+                        session_creds
+                        and session_creds.identity_id == active_identity.id
+                        and datetime.now(timezone.utc) < session_creds.expires_at
+                    ):
+                        logger.debug(
+                            "Using session-hydrated credentials for identity %s",
+                            active_identity.id,
+                        )
+                        return session_creds
+
+            if not active_identity:
+                # Try to use configured default
+                await self.ensure_default_identity()
+                active_identity = _ctx_get_identity()
+                if not active_identity:
+                    await self._raise_no_active_identity()
+
+            identity_id = active_identity.id
+            logger.debug(
+                "Getting credentials for active identity: %s", identity_id
+            )
+
+            # Fast path: in-memory credentials still comfortably valid
+            cached_creds = self._credentials_cache.get(identity_id)
+            if cached_creds and cached_creds.identity_id == identity_id:
+                now = datetime.now(timezone.utc)
+                refresh_at = cached_creds.expires_at - timedelta(
+                    seconds=self._CREDENTIAL_REFRESH_SKEW_SECONDS
+                )
+                if now < refresh_at:
+                    logger.debug(
+                        "Using in-memory credentials for identity %s (refresh at %s)",
+                        identity_id,
+                        refresh_at,
+                    )
+                    return cached_creds
+                logger.debug(
+                    "In-memory credentials for %s are near expiry, refreshing",
+                    identity_id,
+                )
+
+            # Slow path: coalesce concurrent refreshes per identity so
+            # bursty tool calls trigger at most one provider fetch.
+            refresh_lock = await self._get_refresh_lock(identity_id)
+            async with refresh_lock:
+                # Re-check in-memory cache now that we hold the lock; a
+                # previous waiter may have already refreshed.
+                cached_creds = self._credentials_cache.get(identity_id)
+                if cached_creds and cached_creds.identity_id == identity_id:
+                    now = datetime.now(timezone.utc)
+                    refresh_at = cached_creds.expires_at - timedelta(
+                        seconds=self._CREDENTIAL_REFRESH_SKEW_SECONDS
+                    )
+                    if now < refresh_at:
+                        logger.debug(
+                            "Reusing credentials refreshed by another task for %s",
+                            identity_id,
+                        )
+                        return cached_creds
+
+                # Re-check token store cache as well
+                cached_access = await self.get_token(
+                    provider_type=self.provider.provider_type,
+                    identity_id=identity_id,
+                    token_kind=TokenKind.ACCESS,
+                    region=active_identity.attributes.get("region"),
+                )
+
+                if cached_access and not cached_access.is_expired():
+                    if (
+                        hasattr(self.provider, "headers_are_identity_specific")
+                        and self.provider.headers_are_identity_specific()
+                    ):
+                        cached_creds = self._credentials_cache.get(identity_id)
+                        if (
+                            cached_creds
+                            and cached_creds.access_token == cached_access.value
+                            and datetime.now(timezone.utc) < cached_creds.expires_at
+                        ):
+                            logger.debug(
+                                "Using cached full credentials for %s",
+                                identity_id,
+                            )
+                            _ctx_set_credentials(cached_creds)
+                            return cached_creds
+                        logger.debug(
+                            "%s: cached token valid but full credentials not cached, fetching fresh",
+                            self.provider.provider_type,
+                        )
+                    else:
+                        creds = AuthCredentials(
+                            identity_id=identity_id,
+                            access_token=cached_access.value,
+                            expires_at=cached_access.expires_at,
+                            base_url=(
+                                self.provider.get_region_endpoint()
+                                if hasattr(self.provider, "get_region_endpoint")
+                                else None
+                            ),
+                            headers=(
+                                await self.provider.get_headers()
+                                if hasattr(self.provider, "get_headers")
+                                else {}
+                            ),
+                        )
+                        _ctx_set_credentials(creds)
+                        return creds
+                elif cached_access:
+                    logger.debug(
+                        "Credentials for %s expired, refreshing", identity_id
+                    )
+
+                logger.debug(
+                    "Fetching fresh credentials from %s for identity %s",
+                    self.provider.provider_type,
+                    identity_id,
+                )
+                credentials = await self.provider.get_identity_credentials(
+                    identity_id
+                )
+
+                await self.set_token(
+                    provider_type=self.provider.provider_type,
+                    identity_id=identity_id,
+                    token_kind=TokenKind.ACCESS,
+                    token=credentials.access_token,
+                    expires_at=credentials.expires_at,
+                    metadata={"base_url": credentials.base_url},
+                    region=active_identity.attributes.get("region"),
+                )
+
+                self._credentials_cache[identity_id] = credentials
+                _ctx_set_credentials(credentials)
+
+                logger.debug(
+                    "Got credentials for %s, expires at %s",
+                    identity_id,
+                    credentials.expires_at,
+                )
+                return credentials
+
+        # For single-identity providers, create synthetic credentials
+        else:
+            # Check if we have cached credentials
+            cached_creds = _ctx_get_credentials()
+            if (
+                cached_creds
+                and datetime.now(timezone.utc) < cached_creds.expires_at
+            ):
+                return cached_creds
+
+            identity_id = "default"
+
+            # Get token and headers from provider
+            token = await self.provider.get_token()
+            headers = await self.provider.get_headers()
+
+            credentials = AuthCredentials(
+                identity_id=identity_id,
+                access_token=token.value,
+                expires_at=token.expires_at,
+                base_url=(
+                    self.provider.get_region_endpoint()
+                    if hasattr(self.provider, "get_region_endpoint")
+                    else ""
+                ),
+                headers=headers,
+            )
+
+            _ctx_set_credentials(credentials)
+            logger.info(
+                f"Cached credentials for identity {identity_id} with client ID: {credentials.headers.get('Amazon-Advertising-API-ClientId')}"
+            )
+            return credentials
+
+    async def get_headers(self) -> Dict[str, str]:
+        """Get authentication headers for API requests.
+
+        Retrieves authentication headers including the profile scope
+        if an active profile is set.
+
+        :return: Dictionary of authentication headers
+        :rtype: Dict[str, str]
+        """
+        credentials = await self.get_active_credentials()
+        headers = credentials.headers.copy()
+
+        # Debug logging to trace the issue
+        logger.info(f"Auth headers from credentials: {list(headers.keys())}")
+
+        # Add Authorization header from access token
+        if credentials.access_token:
+            headers["Authorization"] = f"Bearer {credentials.access_token}"
+
+        # Add profile ID to Scope header if we have one
+        profile_id = self.get_active_profile_id()
+        if profile_id:
+            headers["Amazon-Advertising-API-Scope"] = profile_id
+
+        return headers
+
+    # Profile management
+
+    def set_active_profile_id(self, profile_id: str) -> None:
+        """Set the active profile ID for the current identity.
+
+        Sets the Amazon Ads profile ID to use for API operations.
+        If no active identity is set, stores as the default profile.
+
+        :param profile_id: The Amazon Ads profile ID to use
+        :type profile_id: str
+        :return: None
+        :rtype: None
+        """
+        active_identity = _ctx_get_identity()
+        if not active_identity:
+            # Store as default
+            self._default_profile_id = profile_id
+        else:
+            identity_id = active_identity.id
+            # Copy-on-write: create new dict to avoid mutating other contexts
+            current = _ctx_get_profiles()
+            _ctx_set_profiles({**current, identity_id: profile_id})
+
+        logger.info(f"Set active profile {profile_id}")
+
+    def get_active_profile_id(self) -> Optional[str]:
+        """Get the active profile ID for the current identity.
+
+        Returns the profile ID for the currently active identity,
+        or the default profile ID if no identity is active.
+
+        :return: Active profile ID or None if none set
+        :rtype: Optional[str]
+        """
+        active_identity = _ctx_get_identity()
+        if not active_identity:
+            return self._default_profile_id
+
+        identity_id = active_identity.id
+        return _ctx_get_profiles().get(identity_id, self._default_profile_id)
+
+    def clear_active_profile_id(self) -> None:
+        """Clear the active profile ID for the current identity.
+
+        Removes the profile ID association for the currently
+        active identity.
+
+        :return: None
+        :rtype: None
+        """
+        active_identity = _ctx_get_identity()
+        if active_identity:
+            identity_id = active_identity.id
+            current = _ctx_get_profiles()
+            if identity_id in current:
+                # Copy-on-write: create new dict without the entry
+                updated = {k: v for k, v in current.items() if k != identity_id}
+                _ctx_set_profiles(updated)
+                logger.info(f"Cleared active profile for identity {identity_id}")
+
+    def get_active_region(self) -> Optional[str]:
+        """Get the normalized region for the active identity.
+
+        Returns the normalized region code for the currently
+        active identity or provider.
+
+        :return: Normalized region code (na, eu, fe) or None
+        :rtype: Optional[str]
+        """
+        active_identity = _ctx_get_identity()
+        identity_region = None
+        if active_identity:
+            try:
+                attrs = getattr(active_identity, "attributes", {})
+                region = attrs.get("region")
+                if isinstance(region, str) and region.lower() in {"na", "eu", "fe"}:
+                    identity_region = region.lower()
+            except (AttributeError, TypeError, KeyError):
+                pass
+
+        region_controlled_by_identity = getattr(
+            self.provider,
+            "region_controlled_by_identity",
+            None,
+        )
+        if (
+            callable(region_controlled_by_identity)
+            and region_controlled_by_identity()
+            and identity_region
+        ):
+            return identity_region
+
+        if self.provider and hasattr(self.provider, "region"):
+            return self.provider.region
+
+        if identity_region:
+            return identity_region
+
+        return None
+
+    def get_profile_source(self) -> str:
+        """Get the source of the active profile ID.
+
+        Returns whether the active profile ID was explicitly set
+        for the current identity or is using the default.
+
+        :return: 'explicit' if set for current identity, 'default' otherwise
+        :rtype: str
+        """
+        active_identity = _ctx_get_identity()
+        if active_identity and active_identity.id in _ctx_get_profiles():
+            return "explicit"
+        return "default"
+
+    def get_active_identity_id(self) -> Optional[str]:
+        """Get the ID of the active identity.
+
+        Returns the ID of the currently active identity, if any.
+
+        :return: Active identity ID or None
+        :rtype: Optional[str]
+        """
+        active_identity = _ctx_get_identity()
+        if active_identity:
+            return active_identity.id
+        return None
+
+    # Token Store interface methods
+
+    @property
+    def token_store(self) -> TokenStore:
+        """Get the unified token store instance.
+
+        :return: Token store instance
+        :rtype: TokenStore
+        """
+        return self._token_store
+
+    async def get_token(
+        self,
+        provider_type: str,
+        identity_id: str,
+        token_kind: TokenKind,
+        region: Optional[str] = None,
+        profile_id: Optional[str] = None,
+    ) -> Optional[TokenEntry]:
+        """
+        Get a token from the unified store.
+
+        Retrieves a token from the token store based on the provided
+        provider type, identity, and token kind. Returns None if
+        the token is not found or has expired.
+
+        :param provider_type: Provider type (e.g., 'direct', 'openbridge')
+        :type provider_type: str
+        :param identity_id: Identity identifier
+        :type identity_id: str
+        :param token_kind: Type of token
+        :type token_kind: TokenKind
+        :param region: Optional region
+        :type region: Optional[str]
+        :param profile_id: Optional profile ID
+        :type profile_id: Optional[str]
+        :return: Token entry if found and not expired
+        :rtype: Optional[TokenEntry]
+        """
+        key = TokenKey(
+            provider_type=provider_type,
+            identity_id=identity_id,
+            token_kind=token_kind,
+            region=region,
+            profile_id=profile_id,
+        )
+        return await self._token_store.get(key)
+
+    async def set_token(
+        self,
+        provider_type: str,
+        identity_id: str,
+        token_kind: TokenKind,
+        token: str,
+        expires_at: datetime,
+        metadata: Optional[Dict[str, Any]] = None,
+        region: Optional[str] = None,
+        profile_id: Optional[str] = None,
+    ) -> None:
+        """Store a token in the unified store.
+
+        :param provider_type: Provider type (e.g., 'direct', 'openbridge')
+        :type provider_type: str
+        :param identity_id: Identity identifier
+        :type identity_id: str
+        :param token_kind: Type of token
+        :type token_kind: TokenKind
+        :param token: The token value
+        :type token: str
+        :param expires_at: When the token expires
+        :type expires_at: datetime
+        :param metadata: Optional metadata
+        :type metadata: Optional[Dict[str, Any]]
+        :param region: Optional region
+        :type region: Optional[str]
+        :param profile_id: Optional profile ID
+        :type profile_id: Optional[str]
+        """
+        key = TokenKey(
+            provider_type=provider_type,
+            identity_id=identity_id,
+            token_kind=token_kind,
+            region=region,
+            profile_id=profile_id,
+        )
+        entry = TokenEntry(value=token, expires_at=expires_at, metadata=metadata or {})
+        await self._token_store.set(key, entry)
+
+    async def invalidate_token(
+        self,
+        provider_type: str,
+        identity_id: str,
+        token_kind: TokenKind,
+        region: Optional[str] = None,
+        profile_id: Optional[str] = None,
+    ) -> None:
+        """Invalidate a specific token.
+
+        :param provider_type: Provider type
+        :type provider_type: str
+        :param identity_id: Identity identifier
+        :type identity_id: str
+        :param token_kind: Type of token
+        :type token_kind: TokenKind
+        :param region: Optional region
+        :type region: Optional[str]
+        :param profile_id: Optional profile ID
+        :type profile_id: Optional[str]
+        """
+        key = TokenKey(
+            provider_type=provider_type,
+            identity_id=identity_id,
+            token_kind=token_kind,
+            region=region,
+            profile_id=profile_id,
+        )
+        await self._token_store.invalidate(key)
+
+    async def close(self):
+        """Clean up resources.
+
+        Closes the authentication provider and clears cached
+        credentials to free up resources.
+
+        :return: None
+        :rtype: None
+        """
+        if self.provider:
+            await self.provider.close()
+        await self._token_store.clear()
+        reset_session_state()
+
+    @classmethod
+    def reset(cls):
+        """Reset singleton instance.
+
+        Resets the singleton instance, primarily used for
+        testing purposes to ensure clean state.
+
+        :return: None
+        :rtype: None
+        """
+        global _auth_manager
+        if cls._instance:
+            cls._instance = None
+        _auth_manager = None
+        reset_session_state()
+
+
+# Global auth manager instance
+_auth_manager: Optional[AuthManager] = None
+
+
+def get_auth_manager() -> AuthManager:
+    """Get or create the global authentication manager instance.
+
+    Returns the global singleton instance of AuthManager,
+    creating it if it doesn't exist.
+
+    :return: Global authentication manager instance
+    :rtype: AuthManager
+    """
+    global _auth_manager
+    if _auth_manager is None:
+        _auth_manager = AuthManager()
+    return _auth_manager

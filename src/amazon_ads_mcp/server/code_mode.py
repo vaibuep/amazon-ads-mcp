@@ -1,0 +1,660 @@
+"""Code Mode integration for Amazon Ads MCP.
+
+Replaces the full tool catalog with meta-tools (discovery + execute) that let
+the LLM discover tools on demand and write Python scripts using
+``await call_tool(name, params)`` in a sandbox.
+
+Measured token reduction: 98.4% (34,971 -> 547 tokens) across 55 tools.
+
+Configuration is driven by ``Settings`` (env vars ``CODE_MODE``,
+``CODE_MODE_INCLUDE_TAGS``, ``CODE_MODE_MAX_DURATION_SECS``,
+``CODE_MODE_MAX_MEMORY``).
+
+Integration point: ``ServerBuilder._apply_code_mode()`` calls helpers here.
+
+See also: docs/code-mode.md
+"""
+
+from __future__ import annotations
+
+import asyncio
+import inspect
+import logging
+from typing import TYPE_CHECKING, Any, Dict, List
+
+if TYPE_CHECKING:
+    from fastmcp import FastMCP
+
+from fastmcp.server.dependencies import get_context
+
+from ..config.settings import settings
+from ._polling_guidance import SANDBOX_POLLING_GUIDANCE
+from ..middleware.auth_session_bridge import (
+    hydrate_and_reconcile_auth_from_mcp_session,
+    persist_auth_to_mcp_session,
+)
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Prefix -> human-readable tag mapping
+# ---------------------------------------------------------------------------
+# Derived from packages.json groups and prefix assignments.
+# Multiple prefixes can map to the same tag.
+PREFIX_TO_TAG: Dict[str, str] = {
+    "cm": "campaign-management",
+    "sp": "sponsored-products",
+    "spv1": "sponsored-products-v1",
+    "sb": "sponsored-brands",
+    "sbv1": "sponsored-brands-v1",
+    "sd": "sponsored-display",
+    "sdv1": "sponsored-display-v1",
+    "dsp": "programmatic-dsp",
+    "dspv1": "programmatic-dsp-v1",
+    "amc": "amazon-marketing-cloud",
+    "ac": "accounts",
+    "rp": "reporting",
+    "br": "brand-insights",
+    "st": "stores",
+    "stv1": "stores-v1",
+    "aud": "audiences",
+    "attr": "attribution",
+    "ri": "recommendations-insights",
+    "creat": "creative-assets",
+    "dp": "data-provider",
+    "pm": "products-metadata",
+    "prod": "products-eligibility",
+    "mod": "moderation",
+    "ams": "marketing-stream",
+    "loc": "locations",
+    "export": "exports",
+    "mmm": "marketing-mix-modeling",
+    "mp": "media-planning",
+    "fc": "forecasts",
+    "bsm": "brand-stores",
+    "test": "test-account",
+}
+
+BUILTIN_TAG = "server-management"
+
+
+# Description shown to LLMs for the `execute` meta-tool. Keeps `call_tool` as
+# the single sandbox surface and documents the catch behavior + the real
+# Monty sandbox guardrails (verified by repro: `asyncio.sleep` raises
+# AttributeError, network/FS modules unavailable, print() output is client-
+# path dependent). Drift here will mislead callers — keep aligned with
+# `AuthBridgingSandboxProvider.run` and the integration tests.
+EXECUTE_DESCRIPTION = (
+    "Run async Python in a sandboxed interpreter. The whole script runs as one\n"
+    "turn; use `return` to produce the tool result.\n"
+    "\n"
+    "Available in scope:\n"
+    "- `await call_tool(name: str, params: dict) -> Any` — calls any backend tool.\n"
+    "  Failures raise `RuntimeError(<envelope_json>)` where the message body\n"
+    "  is the full v1 cross-server error envelope JSON. Inside the sandbox:\n"
+    "      try:\n"
+    "          await call_tool(name, params)\n"
+    "      except RuntimeError as e:\n"
+    "          env = json.loads(str(e))\n"
+    "          # env['error_kind'], env['hints'], env['error_code'],\n"
+    "          # env['retryable'], env.get('_meta', {}) all available.\n"
+    "  Non-envelope failures fall back to `RuntimeError(\"<OriginalType>: <message>\")`.\n"
+    "  Both forms are catchable with `try/except RuntimeError:`. The format matches\n"
+    "  Amazon SP MCP for cross-server symmetry.\n"
+    "\n"
+    "Sandbox guardrails (Monty interpreter):\n"
+    "- No network: `urllib`, `requests`, `httpx`, `socket` not importable. "
+    "Use `call_tool`.\n"
+    "- No filesystem writes: `open()` is missing from builtins; `os` and "
+    "`pathlib` import successfully but most side-effecting methods are "
+    "gated. Tool results larger than ~1 MB may be auto-stashed by the host "
+    "client.\n"
+    "- **Stdlib (verified against `pydantic_monty==0.0.11`; allowlist is "
+    "hardcoded in Monty's compiled extension and not configurable from "
+    "Python — may differ on other CodeMode hosts running a different "
+    "pydantic_monty):**\n"
+    "    - Available: `json`, `re`, `math`, `datetime`, `sys`, `typing`, "
+    "`asyncio`, `os`, `pathlib`.\n"
+    "    - Blocked: `collections`, `itertools`, `functools`, `statistics`, "
+    "`decimal`, `dataclasses`, `random`, `string`, `time`, `base64`, "
+    "`hashlib`, `urllib.parse`. Use built-ins and comprehensions for "
+    "aggregation; for hashing/encoding/URL work, request a server-side "
+    "tool via `await call_tool(...)`.\n"
+    "- **Builtins (verified missing / behavior differences):**\n"
+    "    - `hasattr(o, k)` is unavailable. Use a unique sentinel with "
+    "`getattr`:\n"
+    "      `_MISSING = []` (or `{}`), then "
+    "`getattr(o, k, _MISSING) is not _MISSING`.\n"
+    "      `object()` is unavailable in this sandbox.\n"
+    "    - `callable(x)` is unavailable and "
+    "`getattr(x, '__call__', None) is not None` is not reliable for built-in "
+    "instances or functions in this sandbox.\n"
+    "      Prefer known-callable inputs, or guarded invocation with "
+    "`try: x(...); except TypeError:` when safe.\n"
+    "    - **No reliable capability-probing on objects.** The `_MISSING` "
+    "sentinel pattern above works for **module** attributes (e.g. "
+    "`getattr(math, 'pi', _MISSING)`) but not for methods on built-in "
+    "instances or attributes on user-defined functions. In this sandbox, "
+    "built-in methods are invokable via `d.keys()` syntax but are not "
+    "reachable as attributes via `d.keys` (which itself raises "
+    "`AttributeError`). Same for function attributes — `fn.__name__` "
+    "raises `AttributeError`. `getattr(o, k, default)` returns `default` "
+    "for these cases not because `getattr` is misbehaving but because the "
+    "attribute isn't there. Write code that knows the shape of its inputs "
+    "rather than probing for capabilities.\n"
+    "    - `setattr`, `dir`, `vars`, `globals`, `locals`, `open` are all "
+    "absent.\n"
+    "- **Blocked-import error semantics:** inside the sandbox, "
+    "`from collections import Counter` raises a stock Python "
+    "`ImportError` (NOT a `RuntimeError`-wrapped envelope). Catch with "
+    "`except ImportError:` (or `except Exception:`). The v1 "
+    "`sandbox_runtime` / `SANDBOX_MODULE_BLOCKED` envelope only fires "
+    "when the import error is **uncaught** and propagates out of "
+    "`execute` — at which point the calling tool layer sees the typed "
+    "envelope.\n"
+    "- **Unsupported-syntax error semantics:** `class` definitions, `match` "
+    "statements, and other parser-not-yet-supported constructs raise a "
+    "`NotImplementedError` that DOES surface as a v1 envelope with "
+    "`error_kind=sandbox_runtime` / `error_code=SANDBOX_RUNTIME_ERROR`. "
+    "Asymmetric with imports — known limitation.\n"
+    "- `print()` output may be discarded depending on the client path; return "
+    "data via the script's final expression instead.\n"
+    f"- {SANDBOX_POLLING_GUIDANCE}\n"
+    "- `try`/`except`/`finally` work normally. To probe many candidates in one\n"
+    "  block, wrap each `await call_tool(...)` in its own `try/except RuntimeError`.\n"
+    "- `with` works for pure-Python context managers (e.g. `decimal.localcontext()`).\n"
+    "  It does NOT work for `open(...)` because file I/O is blocked.\n"
+    "- `json.dumps(default=...)` may trip on Pydantic models; call `model_dump()` first.\n"
+    "\n"
+    "Auth, region, and active profile are managed by the server. Do not pass\n"
+    "`Amazon-Ads-AccountId`, `Amazon-Advertising-API-Scope`, or bearer tokens in\n"
+    "`params` — set them once via `set_active_identity` / `set_region` /\n"
+    "`set_active_profile` and they ride every subsequent `call_tool`.\n"
+    "\n"
+    "Session-scope contract:\n"
+    "- Call `get_session_state` first; if `state_scope == 'request'`, "
+    "re-run `set_active_identity` / `set_region` / `set_active_profile` "
+    "in each `execute` block. If `state_scope == 'session'`, set them "
+    "once via the corresponding tools and they ride subsequent "
+    "`call_tool` calls in that session.\n"
+    "- To detect the transport's scope, call `get_session_state` at the start\n"
+    "  of a block. It is a read-only probe with no side effects.\n"
+    "- Rule: Re-establish context before the next tool call iff `state_scope == 'request'` or `state_reason` is not null.\n"
+    "- Within a block the scope cannot change; one probe per block is sufficient.\n"
+    "- `state_reason` enumerates: `\"no_mcp_session\"` (request-scoped transport),\n"
+    "  `\"token_swapped\"` (a different bearer/refresh token arrived mid-session\n"
+    "  and the previous tenant's state was cleared — `state_scope` stays\n"
+    "  `'session'` but you must re-establish context for the new tenant), and\n"
+    "  `\"bridge_unavailable\"` (reserved; treat as `'request'`).\n"
+)
+
+
+def translate_to_sandbox_runtime_error(exc: BaseException) -> RuntimeError:
+    """Translate ``exc`` into a ``RuntimeError`` for the Monty sandbox.
+
+    The Code Mode auth bridge (``AuthBridgingSandboxProvider``) catches every
+    exception raised by ``call_tool`` and re-raises a ``RuntimeError`` so the
+    sandbox's ``try/except RuntimeError:`` can catch it. This helper
+    centralizes the translation rule so it stays aligned with the v1
+    contract documented in ``EXECUTE_DESCRIPTION``.
+
+    Translation rule (matches Amazon SP MCP for cross-server symmetry):
+
+    - ``ToolError`` whose body is a v1 envelope JSON →
+      ``RuntimeError(envelope_json_text)``. Inside-sandbox agents can do
+      ``json.loads(str(e))`` to access ``error_kind``, ``hints``,
+      ``error_code``, ``retryable``, ``_meta`` — the full envelope, not
+      a truncated summary.
+    - ``ToolError`` with non-envelope body →
+      ``RuntimeError(f"ToolError: {body_text}")``
+    - ``RuntimeError`` already → return as-is (no double-wrap)
+    - any other ``Exception`` →
+      ``RuntimeError(f"{type(exc).__name__}: {exc}")``
+
+    Rationale: the prior format ``RuntimeError("<error_kind>: <summary>")``
+    threw away the structured fields that agents need to make recovery
+    decisions inside ``execute`` blocks. Both servers now expose the full
+    envelope so cross-server agent code can write a single recovery
+    handler. See ``openbridge-mcp/CONTRACT.md``.
+    """
+    import json as _json
+    import re as _re
+
+    from fastmcp.exceptions import NotFoundError as _NotFoundError
+    from fastmcp.exceptions import ToolError as _ToolError
+
+    if isinstance(exc, RuntimeError):
+        return exc
+
+    if isinstance(exc, _ToolError):
+        text = str(exc)
+        # Detect v1 envelope: pass through unchanged so agents can call
+        # json.loads(str(e)) and access the full structured fields.
+        try:
+            parsed = _json.loads(text)
+        except (TypeError, ValueError):
+            parsed = None
+        if (
+            isinstance(parsed, dict)
+            and "error_kind" in parsed
+            and "summary" in parsed
+            and parsed.get("_envelope_version") == 1
+        ):
+            return RuntimeError(text)
+        # Non-envelope ToolError — preserve type-name prefix for legacy
+        # parsing patterns.
+        return RuntimeError(f"ToolError: {text}")
+
+    if isinstance(exc, _NotFoundError):
+        # R5: wrap unknown-tool errors in v1 envelope JSON so defensive
+        # caller code can json.loads(str(e)) without a try/except for
+        # this special case. Cross-server symmetry — every error kind
+        # the caller might face is now envelope-shaped.
+        msg = str(exc)
+        match = _re.match(r"Unknown tool:\s*(\S+)", msg)
+        tool_name = match.group(1) if match else ""
+        envelope = {
+            "_envelope_version": 1,
+            "error_kind": "tool_not_found",
+            "tool": tool_name,
+            "summary": msg,
+            "details": [],
+            "hints": [
+                "Discover tools via the 'tags', 'search', and 'get_schema' "
+                "meta-tools (the discovery surface registered by Code Mode). "
+                "From an execute block: "
+                "await call_tool('tags', {}); "
+                "await call_tool('search', {'query': '<keyword>'}); "
+                "await call_tool('get_schema', {'tools': [...]}).",
+                "Tool names are case-sensitive and may carry namespace "
+                "prefixes (e.g. allv1_QueryCampaign).",
+            ],
+            "examples": [],
+            "error_code": "TOOL_NOT_FOUND",
+            "retryable": False,
+        }
+        return RuntimeError(_json.dumps(envelope))
+
+    return RuntimeError(f"{type(exc).__name__}: {exc}")
+
+
+def build_discovery_tools() -> list:
+    """Build discovery tool instances based on settings.
+
+    Default: ``[GetTags(), Search(), GetSchemas()]`` — the LLM can browse
+    categories via tags, search by keyword, then fetch full schemas.
+
+    Set ``CODE_MODE_INCLUDE_TAGS=false`` to drop ``GetTags`` (useful for
+    small catalogs where tag browsing adds unnecessary round-trips).
+
+    :return: List of discovery tool instances for CodeMode
+    :rtype: list
+    :raises ImportError: If ``fastmcp[code-mode]`` extra is not installed
+    """
+    try:
+        from fastmcp.experimental.transforms.code_mode import (
+            GetSchemas,
+            GetTags,
+            Search,
+        )
+    except ImportError as exc:
+        raise ImportError(
+            "Code mode requires the 'code-mode' extra. "
+            "Install with: pip install 'fastmcp[code-mode]>=3.1.0'"
+        ) from exc
+
+    tools: list = []
+
+    if settings.code_mode_include_tags:
+        tools.append(GetTags())
+
+    tools.extend([Search(), GetSchemas()])
+    return tools
+
+
+class MontyDispatchSandboxProvider:
+    """Sandbox provider that drives Monty via the start/resume protocol.
+
+    FastMCP's stock ``MontySandboxProvider`` calls ``Monty.run_async()``,
+    which surfaces external-function exceptions as ``MontyRuntimeError``
+    *outside* the sandbox — the script aborts before any in-sandbox
+    ``try/except`` can catch them. This provider drives Monty manually
+    through ``start()`` + ``FunctionSnapshot.resume({"exception": ...})`` so
+    exceptions are injected back into the VM and ordinary Python
+    ``try/except`` semantics work for ``call_tool`` failures.
+
+    Verified by repro:
+      - ``run_async`` path: in-sandbox ``try/except RuntimeError`` does NOT
+        catch external errors.
+      - ``start/resume`` path with ``resume({"exception": RuntimeError(...)})``:
+        the in-sandbox ``except RuntimeError`` catches as expected and the
+        exception type is preserved.
+
+    External-function results that are coroutines are awaited on the host
+    event loop. VM resume calls are offloaded to a worker thread (mirroring
+    upstream ``Monty.run_async`` behavior) so a long-running sandbox
+    snippet doesn't block the asyncio loop.
+
+    :param limits: Resource limits (forwarded to ``Monty.start``).
+    :type limits: dict | None
+    """
+
+    def __init__(self, *, limits: Any | None = None) -> None:
+        self.limits = limits
+
+    async def run(
+        self,
+        code: str,
+        *,
+        inputs: dict[str, Any] | None = None,
+        external_functions: dict[str, Any] | None = None,
+    ) -> Any:
+        try:
+            import pydantic_monty as pm
+        except ImportError as exc:  # pragma: no cover - validated at startup
+            raise ImportError(
+                "MontyDispatchSandboxProvider requires pydantic-monty. "
+                "Install with: pip install 'fastmcp[code-mode]>=3.1.0'"
+            ) from exc
+
+        inputs = inputs or {}
+        externals = external_functions or {}
+
+        monty = pm.Monty(code, inputs=list(inputs))
+        snapshot = await asyncio.to_thread(
+            monty.start,
+            inputs=inputs or None,
+            limits=self.limits,
+        )
+
+        # Pending future results, keyed by Monty call_id. A successful eager
+        # await stashes the value here and we hand it to Monty when it asks
+        # for the FutureSnapshot resolution. Failures take a different path
+        # (FunctionSnapshot.resume({"exception": ...})) because Monty's
+        # FutureSnapshot exception channel does NOT propagate to the
+        # sandbox's surrounding try/except — only FunctionSnapshot exception
+        # injection does. See class docstring + verified probes.
+        pending: dict[int, dict[str, Any]] = {}
+
+        while True:
+            if isinstance(snapshot, pm.MontyComplete):
+                return snapshot.output
+
+            if isinstance(snapshot, pm.FunctionSnapshot):
+                fn_name = snapshot.function_name
+                fn = externals.get(fn_name)
+                if fn is None:
+                    snapshot = await asyncio.to_thread(
+                        snapshot.resume,
+                        {
+                            "exception": NameError(
+                                f"name {fn_name!r} is not defined"
+                            )
+                        },
+                    )
+                    continue
+
+                call_id = snapshot.call_id
+                try:
+                    result = fn(*snapshot.args, **snapshot.kwargs)
+                    if inspect.iscoroutine(result):
+                        # Eagerly await on the host event loop. We do NOT
+                        # park the coroutine and let Monty await via
+                        # FutureSnapshot — Monty's future-exception path
+                        # bypasses in-sandbox try/except, so we collapse
+                        # async externals to a sync result + future-resolve
+                        # for success, or sync exception injection for
+                        # failure (which IS catchable inside the sandbox).
+                        result = await result
+                except Exception as exc:
+                    snapshot = await asyncio.to_thread(
+                        snapshot.resume, {"exception": exc}
+                    )
+                    continue
+
+                # Success path: signal that the call returned an awaitable
+                # so the sandbox's `await call_tool(...)` evaluates without
+                # a "object can't be awaited" TypeError, then immediately
+                # resolve the future with the value we already computed.
+                pending[call_id] = {"return_value": result}
+                snapshot = await asyncio.to_thread(
+                    snapshot.resume, {"future": ...}
+                )
+                continue
+
+            if isinstance(snapshot, pm.FutureSnapshot):
+                results: dict[int, dict[str, Any]] = {}
+                for cid in snapshot.pending_call_ids:
+                    entry = pending.pop(cid, None)
+                    if entry is None:
+                        # Monty asked for a future we never registered —
+                        # treat as a programming error in the dispatch loop.
+                        results[cid] = {
+                            "exception": RuntimeError(
+                                f"No pending future for call_id={cid}"
+                            )
+                        }
+                    else:
+                        results[cid] = entry
+                snapshot = await asyncio.to_thread(snapshot.resume, results)
+                continue
+
+            if isinstance(snapshot, pm.NameLookupSnapshot):
+                # Name not in our external set — let the sandbox raise NameError.
+                snapshot = await asyncio.to_thread(snapshot.resume)
+                continue
+
+            raise RuntimeError(
+                f"Unknown Monty snapshot type: {type(snapshot).__name__}"
+            )
+
+
+class AuthBridgingSandboxProvider:
+    """Wrap a SandboxProvider and bridge auth state for nested call_tool."""
+
+    def __init__(self, inner: Any):
+        self._inner = inner
+
+    async def run(
+        self,
+        code: str,
+        *,
+        inputs: dict[str, Any] | None = None,
+        external_functions: dict[str, Any] | None = None,
+    ) -> Any:
+        wrapped_functions = dict(external_functions or {})
+        original_call_tool = wrapped_functions.get("call_tool")
+        parent_ctx = None
+
+        try:
+            parent_ctx = get_context()
+        except RuntimeError:
+            parent_ctx = None
+
+        if parent_ctx is not None and original_call_tool is not None:
+            call_lock = asyncio.Lock()
+
+            async def bridged_call_tool(name: str, params: dict[str, Any]) -> Any:
+                # Each nested call hydrates from parent MCP session and
+                # persists back to parent session after completion.
+                # Also applies sidecar input transforms (arg_aliases etc.)
+                # — the sandboxed call_tool path doesn't go through the
+                # server's middleware chain, so we run the same rewrite
+                # pipeline here so singular→plural aliases like reportId
+                # fire regardless of which call surface the LLM picked.
+                from .sidecar_middleware import apply_sidecar_input_transforms
+
+                async with call_lock:
+                    tenant_state_cleared = (
+                        await hydrate_and_reconcile_auth_from_mcp_session(
+                            parent_ctx, logger_instance=logger
+                        )
+                    )
+                    if tenant_state_cleared:
+                        logger.info(
+                            "Tenant token changed before nested code-mode call — "
+                            "clearing identity/credentials/profiles"
+                        )
+                    try:
+                        rewritten = await apply_sidecar_input_transforms(
+                            name, params or {}
+                        )
+                        try:
+                            return await original_call_tool(name, rewritten)
+                        except Exception as exc:
+                            # Translate via the v1 envelope-aware helper so
+                            # ToolErrors carrying envelope JSON surface in the
+                            # sandbox as ``RuntimeError("<error_kind>: <summary>")``
+                            # rather than nesting the full envelope JSON
+                            # inside a generic RuntimeError. Non-envelope
+                            # exceptions keep the legacy
+                            # ``RuntimeError("<OriginalType>: <message>")`` form.
+                            # See ``EXECUTE_DESCRIPTION`` and the contract at
+                            # openbridge-mcp/CONTRACT.md.
+                            raise translate_to_sandbox_runtime_error(exc) from None
+                    finally:
+                        await persist_auth_to_mcp_session(
+                            parent_ctx, logger_instance=logger
+                        )
+
+            wrapped_functions["call_tool"] = bridged_call_tool
+
+        return await self._inner.run(
+            code,
+            inputs=inputs,
+            external_functions=wrapped_functions,
+        )
+
+
+def create_auth_bridging_sandbox_provider(inner: Any) -> AuthBridgingSandboxProvider:
+    """Create auth-bridging sandbox wrapper for code-mode execution."""
+    return AuthBridgingSandboxProvider(inner)
+
+
+def code_mode_runtime_available() -> bool:
+    """Report whether the code-mode extra's runtime imports resolve.
+
+    ``ServerBuilder.build()`` probes this BEFORE making any
+    code-mode-conditional decision (progressive disclosure, tool-group
+    builtins), so a missing extra downgrades to genuine CODE_MODE=false
+    behavior instead of a half-configured hybrid.
+    """
+    try:
+        from fastmcp.experimental.transforms import (  # noqa: F401
+            code_mode as _fastmcp_code_mode,
+        )
+        import pydantic_monty  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def create_code_mode_transform():
+    """Create a configured CodeMode transform instance.
+
+    :return: Configured CodeMode transform
+    :raises ImportError: If ``fastmcp[code-mode]`` extra is not installed
+        or the ``pydantic_monty`` runtime dependency is missing.
+    """
+    try:
+        from fastmcp.experimental.transforms import code_mode as fastmcp_code_mode
+    except ImportError as exc:
+        raise ImportError(
+            "Code mode requires the 'code-mode' extra. "
+            "Install with: pip install 'fastmcp[code-mode]>=3.1.0'"
+        ) from exc
+
+    # MontyDispatchSandboxProvider lazy-imports pydantic_monty at .run() time.
+    # Verify it is importable now so we fail loudly at server startup rather
+    # than deep inside a tool call like `execute`.
+    try:
+        import pydantic_monty  # noqa: F401
+    except ImportError as exc:
+        raise ImportError(
+            "Code mode is enabled (CODE_MODE=true) but the Monty sandbox "
+            "runtime dependency 'pydantic_monty' is not installed. "
+            "Install the code-mode extra with: "
+            "pip install 'fastmcp[code-mode]>=3.1.0' "
+            "(or set CODE_MODE=false to disable code mode)."
+        ) from exc
+
+    # NB: MontyDispatchSandboxProvider replaces FastMCP's MontySandboxProvider
+    # because the upstream provider's run_async() path swallows external
+    # exceptions before the sandbox can catch them. See class docstring.
+    sandbox = MontyDispatchSandboxProvider(
+        limits={
+            "max_duration_secs": float(settings.code_mode_max_duration_secs),
+            "max_memory": settings.code_mode_max_memory,
+        }
+    )
+
+    discovery_tools = build_discovery_tools()
+
+    transform = fastmcp_code_mode.CodeMode(
+        sandbox_provider=create_auth_bridging_sandbox_provider(sandbox),
+        discovery_tools=discovery_tools,
+        execute_description=EXECUTE_DESCRIPTION,
+    )
+
+    logger.info(
+        "Created CodeMode transform (timeout=%ds, memory=%dMB, discovery=%d tools, tags=%s)",
+        settings.code_mode_max_duration_secs,
+        settings.code_mode_max_memory // (1024 * 1024),
+        len(discovery_tools),
+        settings.code_mode_include_tags,
+    )
+    return transform
+
+
+async def tag_tools_by_prefix(
+    server: "FastMCP",
+    mounted_servers: Dict[str, List["FastMCP"]],
+) -> int:
+    """Tag all OpenAPI-derived tools by their namespace prefix.
+
+    Uses ``PREFIX_TO_TAG`` mapping for human-readable category names.
+    Creates a new ``set`` before assigning to avoid mutating shared references.
+
+    :param server: Main FastMCP server (unused, for API consistency)
+    :param mounted_servers: Map of prefix -> list of sub-servers
+    :return: Number of tools tagged
+    :rtype: int
+    """
+    tagged = 0
+    for prefix, sub_servers in mounted_servers.items():
+        tag = PREFIX_TO_TAG.get(prefix, prefix)
+        for sub_server in sub_servers:
+            tools = await sub_server.list_tools()
+            for tool_info in tools:
+                try:
+                    tool = await sub_server.get_tool(tool_info.name)
+                    if tool:
+                        # Safe: always create a new set to avoid mutating shared refs
+                        tool.tags = {tag} | (tool.tags or set())
+                        tagged += 1
+                except Exception:
+                    pass  # Skip tools that can't be accessed
+
+    logger.info("Tagged %d OpenAPI tools across %d prefixes", tagged, len(mounted_servers))
+    return tagged
+
+
+async def tag_builtin_tools(server: "FastMCP") -> int:
+    """Tag all builtin tools with 'server-management'.
+
+    :param server: Main FastMCP server
+    :return: Number of tools tagged
+    :rtype: int
+    """
+    tagged = 0
+    tools = await server.list_tools()
+    for tool_info in tools:
+        try:
+            tool = await server.get_tool(tool_info.name)
+            if tool:
+                tool.tags = {BUILTIN_TAG} | (tool.tags or set())
+                tagged += 1
+        except Exception:
+            pass
+    logger.info("Tagged %d builtin tools as '%s'", tagged, BUILTIN_TAG)
+    return tagged
