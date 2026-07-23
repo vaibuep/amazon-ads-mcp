@@ -599,17 +599,19 @@ claude.ai (the web app) adds MCP servers as **custom connectors**, which is a di
 **Requirements:**
 - The server must be reachable at a **public HTTPS URL** (claude.ai's servers can't reach `localhost` or a machine on your LAN). Put it behind a reverse proxy with TLS (e.g. Caddy, Nginx, an AWS/GCP load balancer) or a tunnel (e.g. Cloudflare Tunnel, ngrok) in front of the container.
 - The MCP endpoint path is `/mcp` (e.g. `https://ads.yourdomain.com/mcp`).
+- Public deployments need `MCP_INBOUND_TOKEN` set (a static bearer token) so random callers can't invoke tools using your server's credentials — see `src/amazon_ads_mcp/server/inbound_auth.py`.
+
+**Full walkthrough, including a free-VPS option:** see [`deploy/DEPLOY.md`](deploy/DEPLOY.md). It covers provisioning a server, TLS via Caddy (`docker-compose.prod.yaml`), and all three auth methods end-to-end.
 
 **1. Deploy the server with HTTP transport**
 
 ```bash
 cp .env.example .env
-# Set AUTH_METHOD and your Amazon Ads / Openbridge / Kuudo credentials in .env
-docker compose up -d
-# Server listens on the PORT set in .env (default 9080) with the MCP endpoint at /mcp
+# Set AUTH_METHOD and your Amazon Ads / Openbridge / Kuudo credentials in .env,
+# plus MCP_INBOUND_TOKEN (openssl rand -hex 32) for public deployments
+docker compose -f docker-compose.yaml -f docker-compose.prod.yaml up -d --build
+# Caddy terminates TLS and forwards to the app; see deploy/DEPLOY.md for full setup
 ```
-
-Put this behind your HTTPS reverse proxy/tunnel so it's reachable at, e.g., `https://ads.yourdomain.com/mcp`.
 
 **2. Add the connector in claude.ai**
 

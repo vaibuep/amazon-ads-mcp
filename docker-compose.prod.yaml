@@ -1,0 +1,34 @@
+services:
+  amazon-ads-mcp:
+    # Only reachable from the host loopback; Caddy is the sole public entrypoint.
+    # `!override` replaces (rather than appends to) the base file's ports list —
+    # without it Compose merges both lists and the app stays publicly exposed.
+    ports: !override
+      - "127.0.0.1:${PORT:-9080}:${PORT:-9080}"
+    environment:
+      - AMAZON_ADS_PUBLIC_BASE_URL=https://${PUBLIC_HOSTNAME}
+      # Safe here because Caddy is the only path in (app port is loopback-only above).
+      - AMAZON_ADS_TRUST_FORWARDED_HEADERS=true
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: amazon-ads-mcp-caddy
+    restart: unless-stopped
+    depends_on:
+      - amazon-ads-mcp
+    environment:
+      # Only what Caddyfile needs — deliberately not the full .env (which
+      # also holds Amazon Ads / Openbridge / Kuudo credentials).
+      - PUBLIC_HOSTNAME=${PUBLIC_HOSTNAME}
+      - PORT=${PORT:-9080}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data: {}
+  caddy_config: {}
