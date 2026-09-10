@@ -136,7 +136,7 @@ omit = [ "*/tests/*", "*/debug/*", "*/tool_audit/*", "*/__main__.py", "*/html_te
 exclude_lines = [ "pragma: no cover", "def __repr__", "if self.debug:", "if settings.DEBUG", "raise AssertionError", "raise NotImplementedError", "if 0:", "if __name__ == .__main__.:", "class .*\\bProtocol\\):", "@(abc\\.)?abstractmethod",]
 
 [tool.poetry.dependencies.fastmcp]
-version = ">=3.4.2,<4"
+version = ">=3.4.2,<5"
 extras = [ "tasks",]
 
 [tool.poetry.group.dev.dependencies]
